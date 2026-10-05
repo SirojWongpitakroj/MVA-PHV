@@ -1,8 +1,12 @@
 package merkleBP
 
 import (
+	"bytes"
+	"fmt"
 	"time"
 	"uuid"
+
+	"github.com/SirojWongpitakroj/mva-phv/internal/domain"
 )
 
 // tree struct
@@ -25,6 +29,12 @@ func (k idKey) Compare(other LocatorKey) int {
 // Less reports whether key sorts before other.
 func (key idKey) Less(other LocatorKey) bool {
 	return key.Compare(other) < 0
+}
+
+func (k idKey) Serialize() ([]byte, error) {
+	return domain.Serialize(
+		k.ID,
+	)
 }
 
 type attrKey struct {
@@ -85,10 +95,21 @@ func (key attrKey) Less(other LocatorKey) bool {
 	return key.Compare(other) < 0
 }
 
+func (k attrKey) Serialize() ([]byte, error) {
+	return domain.Serialize(
+		k.SiteID,
+		k.DevID,
+		k.Type,
+		k.TS,
+		k.ID,
+	)
+}
+
 type LocatorKey interface {
 	LogID() uuid.UUID
 	isLogViewKey() bool
 	Compare(other LocatorKey) int
+	Serialize() ([]byte, error)
 }
 
 // A_i
@@ -104,6 +125,53 @@ type LocatorValue struct {
 	LocatorKey
 	PhysicalAddress
 	LeafHash [32]byte
+}
+
+func (v LocatorValue) Serialize() ([]byte, error) {
+	var buf bytes.Buffer
+
+	switch k := v.LocatorKey.(type) {
+	case idKey:
+		encoded, err := domain.Serialize(k.ID)
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(encoded)
+
+	case attrKey:
+		encoded, err := domain.Serialize(
+			k.SiteID,
+			k.DevID,
+			k.Type,
+			k.TS,
+			k.ID,
+		)
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(encoded)
+
+	default:
+		return nil, fmt.Errorf(
+			"unsupported LocatorKey type: %T",
+			v.LocatorKey,
+		)
+	}
+
+	encodedPhyAddr, err := domain.Serialize(
+		v.RegionID,
+		v.ShardID,
+		v.SegmentID,
+		v.LeafID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	buf.Write(encodedPhyAddr)
+
+	buf.Write(v.LeafHash[:])
+
+	return buf.Bytes(), nil
 }
 
 // LocatorQuery describes one continuous range in the ALL key order. The

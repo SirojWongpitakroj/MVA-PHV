@@ -16,7 +16,7 @@ func writeString(buf *bytes.Buffer, s string) error {
 	return err
 }
 
-func Ser(args ...any) ([]byte, error) {
+func Serialize(args ...any) ([]byte, error) {
 	var buf bytes.Buffer
 
 	for _, obj := range args {
@@ -43,4 +43,4 @@ func Ser(args ...any) ([]byte, error) {
 }
 
 // TO-DO
-func Deser(b []byte) {}
+func Deserialize(b []byte) {}

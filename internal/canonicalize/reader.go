@@ -35,7 +35,7 @@ func (r *DatasetReader) Next() bool {
 
 		//add logID, attr to AD
 		var err error
-		r.CurrLog.AD, err = domain.Ser(
+		r.CurrLog.AD, err = domain.Serialize(
 			uint8(1), // format/version
 			r.CurrLog.LogID,
 			r.CurrLog.RegionID,

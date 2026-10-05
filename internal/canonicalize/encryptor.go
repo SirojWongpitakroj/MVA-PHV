@@ -35,7 +35,7 @@ func (r *DatasetReader) encrypt(logBytes []byte) error {
 	}
 
 	//construct AD
-	ad, err := domain.Ser(
+	ad, err := domain.Serialize(
 		"MVA-PHV:LOG:V1",
 		r.CurrLog.LogID,
 		r.CurrLog.RegionID,
