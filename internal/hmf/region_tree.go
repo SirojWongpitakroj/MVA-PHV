@@ -3,8 +3,6 @@ package hmf
 import (
 	"fmt"
 	"math/bits"
-
-	"github.com/SirojWongpitakroj/mva-phv/internal/domain"
 )
 
 type RegionTree struct {
@@ -73,10 +71,13 @@ func (tree *RegionTree) Build(shardHashes [][32]byte) ([]MerkleNode, error) {
 				Hash:  tree.levels[l-1][leftIndex].Hash,
 			}
 			if rightIndex < len(tree.levels[l-1]) {
-				internalNode.Hash = domain.HashPair("NODE",
-					&tree.levels[l-1][leftIndex].Hash,
-					&tree.levels[l-1][rightIndex].Hash,
-				)
+				if err := internalNode.computeInternalHash(
+					tree.TreeID.Type,
+					tree.levels[l-1][leftIndex].Hash,
+					tree.levels[l-1][rightIndex].Hash,
+				); err != nil {
+					return nil, err
+				}
 			}
 			tree.levels[l][parentIndex] = internalNode
 			updates = append(updates, internalNode)
@@ -112,11 +113,13 @@ func (tree *RegionTree) recomputePath(shardIndex int, updates []MerkleNode) ([]M
 			Hash:  childLevel[leftIndex].Hash,
 		}
 		if rightIndex < len(childLevel) {
-			parent.Hash = domain.HashPair(
-				"NODE",
-				&childLevel[leftIndex].Hash,
-				&childLevel[rightIndex].Hash,
-			)
+			if err := parent.computeInternalHash(
+				tree.TreeID.Type,
+				childLevel[leftIndex].Hash,
+				childLevel[rightIndex].Hash,
+			); err != nil {
+				return updates, err
+			}
 		}
 		siblingIndex := leftIndex
 		if index%2 == 0 {

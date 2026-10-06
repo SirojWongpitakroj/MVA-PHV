@@ -3,8 +3,6 @@ package hmf
 import (
 	"fmt"
 	"math/bits"
-
-	"github.com/SirojWongpitakroj/mva-phv/internal/domain"
 )
 
 type GlobalTree struct {
@@ -69,11 +67,13 @@ func (tree *GlobalTree) Build(regionHashes [][32]byte) ([]MerkleNode, error) {
 				Hash:  tree.levels[level-1][leftIndex].Hash,
 			}
 			if rightIndex < len(tree.levels[level-1]) {
-				parent.Hash = domain.HashPair(
-					"NODE",
-					&tree.levels[level-1][leftIndex].Hash,
-					&tree.levels[level-1][rightIndex].Hash,
-				)
+				if err := parent.computeInternalHash(
+					tree.TreeID.Type,
+					tree.levels[level-1][leftIndex].Hash,
+					tree.levels[level-1][rightIndex].Hash,
+				); err != nil {
+					return nil, err
+				}
 			}
 			tree.levels[level][parentIndex] = parent
 			updates = append(updates, parent)
@@ -102,11 +102,13 @@ func (tree *GlobalTree) recomputePath(regionIndex int, updates []MerkleNode) ([]
 			Hash:  children[leftIndex].Hash,
 		}
 		if rightIndex < len(children) {
-			parent.Hash = domain.HashPair(
-				"NODE",
-				&children[leftIndex].Hash,
-				&children[rightIndex].Hash,
-			)
+			if err := parent.computeInternalHash(
+				tree.TreeID.Type,
+				children[leftIndex].Hash,
+				children[rightIndex].Hash,
+			); err != nil {
+				return updates, err
+			}
 		}
 		siblingIndex := leftIndex
 		if index%2 == 0 {

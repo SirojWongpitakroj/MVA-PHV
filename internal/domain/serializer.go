@@ -25,6 +25,10 @@ func Serialize(args ...any) ([]byte, error) {
 			if err := writeString(&buf, v); err != nil {
 				return nil, err
 			}
+		case []byte:
+			if _, err := buf.Write(v); err != nil {
+				return nil, err
+			}
 		case time.Time:
 			if err := binary.Write(
 				&buf,

@@ -9,8 +9,6 @@ import (
 	"github.com/SirojWongpitakroj/mva-phv/internal/domain"
 )
 
-// tree struct
-
 // Key
 type idKey struct {
 	ID uuid.UUID //LogID
@@ -124,12 +122,13 @@ type PhysicalAddress struct {
 type LocatorValue struct {
 	LocatorKey
 	PhysicalAddress
-	LeafHash [32]byte
+	LeafHash [32]byte //c_i; MPM will have to pass in this
 }
 
 func (v LocatorValue) Serialize() ([]byte, error) {
 	var buf bytes.Buffer
 
+	//Key
 	switch k := v.LocatorKey.(type) {
 	case idKey:
 		encoded, err := domain.Serialize(k.ID)
@@ -158,6 +157,7 @@ func (v LocatorValue) Serialize() ([]byte, error) {
 		)
 	}
 
+	//A_i
 	encodedPhyAddr, err := domain.Serialize(
 		v.RegionID,
 		v.ShardID,
@@ -169,27 +169,15 @@ func (v LocatorValue) Serialize() ([]byte, error) {
 	}
 	buf.Write(encodedPhyAddr)
 
+	//c_i
 	buf.Write(v.LeafHash[:])
 
 	return buf.Bytes(), nil
 }
 
-// LocatorQuery describes one continuous range in the ALL key order. The
-// first four fields are exact matches and the time interval is half-open.
-type LocatorQuery struct {
-	TenantID  string
-	ServiceID string
-	LogType   string
-	RegionID  string
-	StartTime time.Time
-	EndTime   time.Time
-}
-
 // LocatorEntry an object sent by the auditor
 type LocatorEntry struct {
-	PageID int64
-	Key    LocatorKey
-	Value  LocatorValue
+	LocatorKey
 }
 
 type LocatorTree struct {
@@ -197,6 +185,7 @@ type LocatorTree struct {
 	NextPageID int64
 	RootHash   [32]byte
 	RootPage   *Page
+	ViewType   string
 
 	Height    int
 	LeafCount int64
@@ -204,7 +193,7 @@ type LocatorTree struct {
 	Order int //m: max children per internal page
 }
 
-// LocatorUpdate contains the final ALL state changed by one insertion.
+// LocatorUpdate contains the final merkleB+ state changed by one insertion.
 type LocatorUpdate struct {
 	Pages []Page
 

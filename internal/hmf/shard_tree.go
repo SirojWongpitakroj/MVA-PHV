@@ -3,8 +3,6 @@ package hmf
 
 import (
 	"fmt"
-
-	"github.com/SirojWongpitakroj/mva-phv/internal/domain"
 )
 
 type ShardTree struct {
@@ -63,10 +61,13 @@ func (tree *ShardTree) mergeFrontier(segmentHash [32]byte) ([]MerkleNode, error)
 			return nil, err
 		}
 
+		rightHash := currNode.Hash
 		currNode = MerkleNode{
 			Level: currNode.Level + 1,
 			Index: currNode.Index / 2,
-			Hash:  domain.HashPair("NODE", &left.Hash, &currNode.Hash),
+		}
+		if err := currNode.computeInternalHash(tree.TreeID.Type, left.Hash, rightHash); err != nil {
+			return nil, err
 		}
 		updates = append(updates, currNode)
 	}
@@ -97,10 +98,13 @@ func (tree *ShardTree) materializeRootPath(updates []MerkleNode) ([]MerkleNode, 
 		}
 
 		//append HashPair of Peak
+		rightHash := right.Hash
 		right = MerkleNode{
 			Level: left.Level + 1,
 			Index: left.Index / 2,
-			Hash:  domain.HashPair("NODE", &left.Hash, &right.Hash),
+		}
+		if err := right.computeInternalHash(tree.TreeID.Type, left.Hash, rightHash); err != nil {
+			return updates, MerkleNode{}, err
 		}
 		updates = append(updates, right)
 	}

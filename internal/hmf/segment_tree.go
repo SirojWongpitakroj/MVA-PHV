@@ -1,9 +1,11 @@
 package hmf
 
 import (
+	"crypto/sha256"
 	"fmt"
 
 	"github.com/SirojWongpitakroj/mva-phv/internal/domain"
+	"uuid"
 )
 
 type SegmentTree struct {
@@ -40,8 +42,18 @@ func NewSegmentTree(regionID string, shardID, segmentID int64, maxLeaves int) *S
 	return tree
 }
 
+// leafHash computes H(LOG || LogID || h || H(h)).
+func leafHash(logID uuid.UUID, h [32]byte) ([32]byte, error) {
+	innerHash := sha256.Sum256(h[:])
+	encoded, err := domain.Serialize([]byte("LOG"), logID, h[:], innerHash[:])
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return sha256.Sum256(encoded), nil
+}
+
 // Append inserts a log into the mutable tree.
-func (tree *SegmentTree) Append(h [32]byte) error {
+func (tree *SegmentTree) Append(logID uuid.UUID, h [32]byte) error { // h = c_i
 	if tree.Sealed {
 		return fmt.Errorf("append segment tree: segment tree sealed")
 	}
@@ -49,10 +61,14 @@ func (tree *SegmentTree) Append(h [32]byte) error {
 		return fmt.Errorf("append segment tree: segment tree is full")
 	}
 
+	hash, err := leafHash(logID, h)
+	if err != nil {
+		return err
+	}
 	tree.levels[0] = append(tree.levels[0], MerkleNode{
 		Level: 0,
 		Index: tree.LeafCount,
-		Hash:  h,
+		Hash:  hash,
 	})
 
 	tree.LeafCount++
@@ -77,7 +93,9 @@ func (tree *SegmentTree) buildInternalNode() ([]MerkleNode, error) {
 				Hash:  children[index].Hash,
 			}
 			if index+1 < len(children) {
-				node.Hash = domain.HashPair("NODE", &children[index].Hash, &children[index+1].Hash)
+				if err := node.computeInternalHash(tree.TreeID.Type, children[index].Hash, children[index+1].Hash); err != nil {
+					return nil, err
+				}
 			}
 			nodes = append(nodes, node)
 			updates = append(updates, node)

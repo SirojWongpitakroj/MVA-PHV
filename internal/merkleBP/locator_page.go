@@ -25,7 +25,7 @@ type Page struct {
 	ParentPageID *int64
 
 	//used by leaf pages
-	Values []LocatorValue
+	Values []*LocatorValue
 	Next   *Page
 
 	//used by internal pages
