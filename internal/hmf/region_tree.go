@@ -1,13 +1,17 @@
 package hmf
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"math/bits"
+
+	"github.com/SirojWongpitakroj/mva-phv/internal/domain"
+	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
 )
 
 type RegionTree struct {
-	*MerkleTree
-	levels    [][]MerkleNode
+	*merkle.MerkleTree
+	levels    [][]merkle.MerkleNode
 	numShards int
 }
 
@@ -19,21 +23,21 @@ func NewRegionTree(regionID string, numShards int) *RegionTree {
 	treeHeight := bits.Len(uint(numShards - 1))
 
 	tree := RegionTree{
-		MerkleTree: &MerkleTree{
-			TreeID: TreeID{
-				Type:     TreeRegion,
+		MerkleTree: &merkle.MerkleTree{
+			TreeID: merkle.TreeID{
+				Type:     merkle.TreeRegion,
 				RegionID: regionID,
 			},
 			LeafCount: int64(numShards),
 			Height:    treeHeight,
 		},
-		levels:    make([][]MerkleNode, treeHeight+1),
+		levels:    make([][]merkle.MerkleNode, treeHeight+1),
 		numShards: numShards,
 	}
 
 	nodeCount := numShards
 	for level := 0; level <= treeHeight; level++ {
-		tree.levels[level] = make([]MerkleNode, nodeCount)
+		tree.levels[level] = make([]merkle.MerkleNode, nodeCount)
 		nodeCount = (nodeCount + 1) / 2
 	}
 	if _, err := tree.Build(make([][32]byte, numShards)); err != nil {
@@ -42,16 +46,31 @@ func NewRegionTree(regionID string, numShards int) *RegionTree {
 	return &tree
 }
 
-func (tree *RegionTree) Build(shardHashes [][32]byte) ([]MerkleNode, error) {
+func (tree *RegionTree) setRoot(merkleRoot [32]byte) error {
+	encodedID, err := domain.Serialize(string(tree.TreeID.Type), tree.TreeID.RegionID)
+	if err != nil {
+		return err
+	}
+	encodedRoot, err := domain.Serialize(
+		[]byte("TREE"), encodedID, uint64(tree.LeafCount), merkleRoot[:],
+	)
+	if err != nil {
+		return err
+	}
+	tree.Root = sha256.Sum256(encodedRoot)
+	return nil
+}
+
+func (tree *RegionTree) Build(shardHashes [][32]byte) ([]merkle.MerkleNode, error) {
 	if tree.numShards != len(shardHashes) {
 		return nil, fmt.Errorf("build shard tree: number of shard-root leaves incorrect")
 	}
 
-	updates := []MerkleNode{}
+	updates := []merkle.MerkleNode{}
 
 	//insert shard root (leaf)
 	for i, h := range shardHashes {
-		leaf := MerkleNode{
+		leaf := merkle.MerkleNode{
 			Level: 0,
 			Index: int64(i),
 			Hash:  h,
@@ -65,14 +84,14 @@ func (tree *RegionTree) Build(shardHashes [][32]byte) ([]MerkleNode, error) {
 		for parentIndex := range tree.levels[l] {
 			leftIndex := parentIndex * 2
 			rightIndex := leftIndex + 1
-			internalNode := MerkleNode{
+			internalNode := merkle.MerkleNode{
 				Level: l,
 				Index: int64(parentIndex),
 				Hash:  tree.levels[l-1][leftIndex].Hash,
 			}
 			if rightIndex < len(tree.levels[l-1]) {
-				if err := internalNode.computeInternalHash(
-					tree.TreeID.Type,
+				if err := internalNode.ComputeInternalHash(
+					"REGINT",
 					tree.levels[l-1][leftIndex].Hash,
 					tree.levels[l-1][rightIndex].Hash,
 				); err != nil {
@@ -84,11 +103,13 @@ func (tree *RegionTree) Build(shardHashes [][32]byte) ([]MerkleNode, error) {
 		}
 	}
 
-	tree.Root = tree.levels[tree.Height][0].Hash
+	if err := tree.setRoot(tree.levels[tree.Height][0].Hash); err != nil {
+		return nil, err
+	}
 	return updates, nil
 }
 
-func (tree *RegionTree) recomputePath(shardIndex int, updates []MerkleNode) ([]MerkleNode, error) {
+func (tree *RegionTree) recomputePath(shardIndex int, updates []merkle.MerkleNode) ([]merkle.MerkleNode, error) {
 	if shardIndex < 0 || int64(shardIndex) >= tree.LeafCount {
 		return updates, fmt.Errorf("recompute region path: shard index %d out of range", shardIndex)
 	}
@@ -107,14 +128,14 @@ func (tree *RegionTree) recomputePath(shardIndex int, updates []MerkleNode) ([]M
 			return updates, fmt.Errorf("recompute region path: parent index %d out of range at level %d", parentIndex, level)
 		}
 
-		parent := MerkleNode{
+		parent := merkle.MerkleNode{
 			Level: level,
 			Index: int64(parentIndex),
 			Hash:  childLevel[leftIndex].Hash,
 		}
 		if rightIndex < len(childLevel) {
-			if err := parent.computeInternalHash(
-				tree.TreeID.Type,
+			if err := parent.ComputeInternalHash(
+				"REGINT",
 				childLevel[leftIndex].Hash,
 				childLevel[rightIndex].Hash,
 			); err != nil {
@@ -135,24 +156,26 @@ func (tree *RegionTree) recomputePath(shardIndex int, updates []MerkleNode) ([]M
 	}
 
 	root := tree.levels[tree.Height][0]
-	tree.Root = root.Hash
+	if err := tree.setRoot(root.Hash); err != nil {
+		return updates, err
+	}
 	return updates, nil
 }
 
-func (tree *RegionTree) updateShardRoot(shardIndex int, shardRoot [32]byte) ([]MerkleNode, error) {
+func (tree *RegionTree) updateShardRoot(shardIndex int, shardRoot [32]byte) ([]merkle.MerkleNode, error) {
 	if shardIndex < 0 || shardIndex >= tree.numShards {
 		return nil, fmt.Errorf("update region tree: shard index %d out of range", shardIndex)
 	}
 
 	//update shard root
-	leaf := MerkleNode{
+	leaf := merkle.MerkleNode{
 		Level: 0,
 		Index: int64(shardIndex),
 		Hash:  shardRoot,
 	}
 	tree.levels[0][shardIndex] = leaf
 
-	updates, err := tree.recomputePath(shardIndex, []MerkleNode{leaf})
+	updates, err := tree.recomputePath(shardIndex, []merkle.MerkleNode{leaf})
 	if err != nil {
 		return nil, err
 	}

@@ -2,6 +2,8 @@ package hmf
 
 import (
 	"time"
+
+	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
 )
 
 type HMFConfig struct {
@@ -12,8 +14,8 @@ type HMFConfig struct {
 
 // HMFUpdate contains every hierarchy node changed when a segment is sealed.
 type HMFUpdate struct {
-	SegmentTreeID    TreeID
-	SegmentNodes     []MerkleNode
+	SegmentTreeID    merkle.TreeID
+	SegmentNodes     []merkle.MerkleNode
 	SegmentRoot      [32]byte
 	SegmentLeaves    int64
 	SegmentHeight    int
@@ -25,22 +27,22 @@ type HMFUpdate struct {
 	SegmentEndedAt   time.Time
 	SegmentSealedAt  time.Time
 
-	ShardTreeID    TreeID
-	ShardNodes     []MerkleNode
+	ShardTreeID    merkle.TreeID
+	ShardNodes     []merkle.MerkleNode
 	ShardRoot      [32]byte
 	ShardLeaves    int64
 	ShardHeight    int
-	ShardFrontiers []MerkleNode
+	ShardFrontiers []merkle.MerkleNode
 
-	RegionTreeID          TreeID
-	RegionNodes           []MerkleNode
+	RegionTreeID          merkle.TreeID
+	RegionNodes           []merkle.MerkleNode
 	RegionRoot            [32]byte
 	RegionLeaves          int64
 	RegionHeight          int
 	RegionParentLeafIndex int64
 
-	GlobalTreeID          TreeID
-	GlobalNodes           []MerkleNode
+	GlobalTreeID          merkle.TreeID
+	GlobalNodes           []merkle.MerkleNode
 	GlobalRoot            [32]byte
 	GlobalLeaves          int64
 	GlobalHeight          int

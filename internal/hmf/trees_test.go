@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 	"uuid"
+
+	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
 )
 
 func testHash(label string, parts ...[]byte) [32]byte {
@@ -25,7 +27,7 @@ func testLogID(i int) uuid.UUID {
 }
 
 func testPayloadHash(i int) [32]byte {
-	return sha256.Sum256([]byte(fmt.Sprintf("ciphertext-%d", i)))
+	return sha256.Sum256(fmt.Appendf(nil, "ciphertext-%d", i))
 }
 
 func testLogLeaf(id uuid.UUID, h [32]byte) [32]byte {
@@ -84,7 +86,7 @@ func TestSegmentTreeRootsAndLifecycle(t *testing.T) {
 				t.Fatalf("root/height/count = %x/%d/%d, want %x/%d/%d", tree.Root, tree.Height, tree.LeafCount, wantRoot, wantHeight, count)
 			}
 			for i, leaf := range leaves {
-				if updates[i] != (MerkleNode{Level: 0, Index: int64(i), Hash: leaf}) {
+				if updates[i] != (merkle.MerkleNode{Level: 0, Index: int64(i), Hash: leaf}) {
 					t.Fatalf("leaf %d = %+v, want hash %x", i, updates[i], leaf)
 				}
 			}
@@ -116,7 +118,7 @@ func TestShardTreeAppendAndFrontiers(t *testing.T) {
 		if tree.Root != wantRoot || tree.Height != wantHeight || tree.LeafCount != int64(i+1) {
 			t.Fatalf("after %d leaves, root/height/count = %x/%d/%d, want %x/%d/%d", i+1, tree.Root, tree.Height, tree.LeafCount, wantRoot, wantHeight, i+1)
 		}
-		if updates[0] != (MerkleNode{Level: 0, Index: int64(i), Hash: leaf}) {
+		if updates[0] != (merkle.MerkleNode{Level: 0, Index: int64(i), Hash: leaf}) {
 			t.Fatalf("append %d omitted its leaf", i)
 		}
 		if updates[len(updates)-1].Hash != wantRoot {
