@@ -64,12 +64,12 @@ func (tree *GlobalHPBF) updateInternalNodes() ([][]merkle.MerkleNode, error) {
 	return updates, nil
 }
 
-func (tree *GlobalHPBF) Commitment(regionHashes [][32]byte) ([][]merkle.MerkleNode, error) {
+func (tree *GlobalHPBF) Commitment(regionHashes [][32]byte, epoch uint64) (GlobalHPBFPartition, error) {
 	if tree == nil || tree.MerkleTree == nil {
-		return nil, fmt.Errorf("commit global bloom filter tree: tree is nil")
+		return GlobalHPBFPartition{}, fmt.Errorf("commit global bloom filter tree: tree is nil")
 	}
 	if len(regionHashes) != int(tree.LeafCount) {
-		return nil, fmt.Errorf("commit global bloom filter tree: got %d region hashes, want %d", len(regionHashes), tree.LeafCount)
+		return GlobalHPBFPartition{}, fmt.Errorf("commit global bloom filter tree: got %d region hashes, want %d", len(regionHashes), tree.LeafCount)
 	}
 
 	for index, hash := range regionHashes {
@@ -82,10 +82,41 @@ func (tree *GlobalHPBF) Commitment(regionHashes [][32]byte) ([][]merkle.MerkleNo
 
 	updates, err := tree.updateInternalNodes()
 	if err != nil {
-		return nil, err
+		return GlobalHPBFPartition{}, err
 	}
 
 	tree.RootHash = tree.levels[tree.Height][0].Hash
 	tree.MerkleTree.Root = tree.RootHash
-	return updates, nil
+	return GlobalHPBFPartition{
+		RootHash:      tree.RootHash,
+		InternalNodes: updates,
+		Epoch:         epoch,
+	}, nil
+}
+
+func (tree *GlobalHPBF) PruneRegions(tokens [3][]byte) []merkle.TreeID {
+	if tree == nil || tree.MerkleTree == nil {
+		return nil
+	}
+
+	var matches []merkle.TreeID
+	for regionID, region := range tree.Regions {
+		if region == nil || region.BloomFilter == nil {
+			continue
+		}
+		containsAll := true
+		for _, token := range tokens {
+			if !region.BloomFilter.Contains(token) {
+				containsAll = false
+				break
+			}
+		}
+		if containsAll {
+			matches = append(matches, merkle.TreeID{
+				Type:     merkle.TreeRegion,
+				RegionID: regionID,
+			})
+		}
+	}
+	return matches
 }

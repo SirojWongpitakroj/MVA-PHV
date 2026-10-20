@@ -86,15 +86,15 @@ func (tree *RegionHBPF) updateInternalNodes() ([][]merkle.MerkleNode, error) {
 	return updates, nil
 }
 
-func (tree *RegionHBPF) Commitment(shardHashes [][32]byte, shardBFs []*BloomFilter) ([][]merkle.MerkleNode, error) {
+func (tree *RegionHBPF) Commitment(shardHashes [][32]byte, shardBFs []*BloomFilter, epoch, index uint64) (RegionHPBFPartition, error) {
 	if tree == nil || tree.MerkleTree == nil {
-		return nil, fmt.Errorf("commit region bloom filter tree: tree is nil")
+		return RegionHPBFPartition{}, fmt.Errorf("commit region bloom filter tree: tree is nil")
 	}
 	if len(shardHashes) != int(tree.LeafCount) {
-		return nil, fmt.Errorf("commit region bloom filter tree: got %d shard hashes, want %d", len(shardHashes), tree.LeafCount)
+		return RegionHPBFPartition{}, fmt.Errorf("commit region bloom filter tree: got %d shard hashes, want %d", len(shardHashes), tree.LeafCount)
 	}
 	if len(shardBFs) != int(tree.LeafCount) {
-		return nil, fmt.Errorf("commit region bloom filter tree: got %d shard filters, want %d", len(shardBFs), tree.LeafCount)
+		return RegionHPBFPartition{}, fmt.Errorf("commit region bloom filter tree: got %d shard filters, want %d", len(shardBFs), tree.LeafCount)
 	}
 	type result struct {
 		updates [][]merkle.MerkleNode
@@ -138,14 +138,21 @@ func (tree *RegionHBPF) Commitment(shardHashes [][32]byte, shardBFs []*BloomFilt
 		}
 	}
 	if resultErr != nil {
-		return nil, resultErr
+		return RegionHPBFPartition{}, resultErr
 	}
 
 	tree.Root = tree.levels[tree.Height][0].Hash
-	return updates, nil
+	return RegionHPBFPartition{
+		TreeID:        tree.TreeID,
+		BloomFilter:   tree.BloomFilter,
+		RootHash:      tree.Root,
+		InternalNodes: updates,
+		Epoch:         epoch,
+		Index:         index,
+	}, nil
 }
 
-func (tree *RegionHBPF) PruneShards(tokens [][3][]byte) []merkle.TreeID {
+func (tree *RegionHBPF) PruneShards(tokens [3][]byte) []merkle.TreeID {
 	if tree == nil || tree.MerkleTree == nil {
 		return nil
 	}
@@ -155,22 +162,19 @@ func (tree *RegionHBPF) PruneShards(tokens [][3][]byte) []merkle.TreeID {
 		if shard == nil || shard.bloomFilter == nil || shard.RegionID != tree.TreeID.RegionID {
 			continue
 		}
-		for _, tokenGroup := range tokens {
-			containsAll := true
-			for _, token := range tokenGroup {
-				if !shard.bloomFilter.Contains(token) {
-					containsAll = false
-					break
-				}
-			}
-			if containsAll {
-				matches = append(matches, merkle.TreeID{
-					Type:     merkle.TreeShard,
-					RegionID: tree.TreeID.RegionID,
-					ShardID:  shardID,
-				})
+		containsAll := true
+		for _, token := range tokens {
+			if !shard.bloomFilter.Contains(token) {
+				containsAll = false
 				break
 			}
+		}
+		if containsAll {
+			matches = append(matches, merkle.TreeID{
+				Type:     merkle.TreeShard,
+				RegionID: tree.TreeID.RegionID,
+				ShardID:  shardID,
+			})
 		}
 	}
 	return matches

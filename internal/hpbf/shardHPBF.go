@@ -5,11 +5,11 @@ import (
 	"fmt"
 
 	"github.com/SirojWongpitakroj/mva-phv/internal/domain"
+	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
 )
 
 type ShardHPBF struct {
-	RegionID    string
-	ShardID     int64
+	merkle.TreeID
 	bloomFilter *BloomFilter
 	RootHash    [32]byte
 }
@@ -21,8 +21,11 @@ func newShardHPBF(regionID string, shardID int64, n int, p float64) (*ShardHPBF,
 	}
 
 	return &ShardHPBF{
-		RegionID:    regionID,
-		ShardID:     shardID,
+		TreeID: merkle.TreeID{
+			Type:     merkle.TreeShard,
+			RegionID: regionID,
+			ShardID:  shardID,
+		},
 		bloomFilter: bf,
 	}, nil
 }
@@ -77,13 +80,13 @@ func (s *ShardHPBF) Contains(siteID, devID, typ string) (bool, error) {
 }
 
 // Commitment hashes the shard Bloom filter state for the given epoch.
-func (s *ShardHPBF) Commitment(epoch uint64) ([32]byte, *BloomFilter, error) {
+func (s *ShardHPBF) Commitment(epoch, index uint64) (ShardHPBFPartition, error) {
 	if s == nil || s.bloomFilter == nil {
-		return [32]byte{}, nil, fmt.Errorf("shard bloom filter is nil")
+		return ShardHPBFPartition{}, fmt.Errorf("shard bloom filter is nil")
 	}
 	bf := s.bloomFilter
 	if bf.m == 0 || bf.k == 0 || uint64(len(bf.bits)) != (bf.m-1)/64+1 {
-		return [32]byte{}, nil, fmt.Errorf("shard bloom filter is invalid")
+		return ShardHPBFPartition{}, fmt.Errorf("shard bloom filter is invalid")
 	}
 
 	bfParts := make([]any, 0, 2+len(bf.bits))
@@ -93,14 +96,20 @@ func (s *ShardHPBF) Commitment(epoch uint64) ([32]byte, *BloomFilter, error) {
 	}
 	encodedBF, err := domain.Serialize(bfParts...)
 	if err != nil {
-		return [32]byte{}, nil, err
+		return ShardHPBFPartition{}, err
 	}
 	encoded, err := domain.Serialize(
-		[]byte("SHBF"), epoch, s.RegionID, uint64(s.ShardID), encodedBF,
+		[]byte("SHBF"), epoch, s.TreeID.RegionID, uint64(s.TreeID.ShardID), encodedBF,
 	)
 	if err != nil {
-		return [32]byte{}, nil, err
+		return ShardHPBFPartition{}, err
 	}
 	s.RootHash = sha256.Sum256(encoded)
-	return s.RootHash, bf, nil
+	return ShardHPBFPartition{
+		TreeID:      s.TreeID,
+		BloomFilter: bf,
+		Commitment:  s.RootHash,
+		Epoch:       epoch,
+		Index:       index,
+	}, nil
 }
