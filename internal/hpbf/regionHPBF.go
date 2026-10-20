@@ -1,0 +1,177 @@
+package hpbf
+
+import (
+	"fmt"
+	"math/bits"
+
+	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
+)
+
+type RegionHBPF struct {
+	*merkle.MerkleTree
+	levels [][]merkle.MerkleNode
+	Shards map[int64]*ShardHPBF
+	Root   [32]byte
+	*BloomFilter
+}
+
+func NewRegionHBPF(regionID string, numShards, n int, p float64) (*RegionHBPF, error) {
+	if numShards <= 0 {
+		return nil, fmt.Errorf("new region bloom filter tree: numShards must be positive")
+	}
+	bf, err := newBloomFilter(n, p)
+	if err != nil {
+		return nil, err
+	}
+
+	height := bits.Len(uint(numShards - 1))
+	tree := &RegionHBPF{
+		MerkleTree: &merkle.MerkleTree{
+			TreeID: merkle.TreeID{
+				Type:     merkle.TreeRegion,
+				RegionID: regionID,
+			},
+			LeafCount: int64(numShards),
+			Height:    height,
+		},
+		levels:      make([][]merkle.MerkleNode, height+1),
+		Shards:      make(map[int64]*ShardHPBF, numShards),
+		BloomFilter: bf,
+	}
+
+	nodeCount := numShards
+	for level := range tree.levels {
+		tree.levels[level] = make([]merkle.MerkleNode, nodeCount)
+		nodeCount = (nodeCount + 1) / 2
+	}
+	return tree, nil
+}
+
+func (tree *RegionHBPF) updateBloomFilter(shardBF *BloomFilter) error {
+	if tree == nil {
+		return fmt.Errorf("update region bloom filter: region bloom filter is nil")
+	}
+	if shardBF == nil {
+		return fmt.Errorf("update region bloom filter: shard bloom filter is nil")
+	}
+	if tree.BloomFilter == nil {
+		return fmt.Errorf("update region bloom filter: region bloom filter is nil")
+	}
+	return tree.BloomFilter.Merge(*shardBF)
+}
+
+func (tree *RegionHBPF) updateInternalNodes() ([][]merkle.MerkleNode, error) {
+	updates := make([][]merkle.MerkleNode, tree.Height)
+	for level := 1; level <= tree.Height; level++ {
+		nodes := make([]merkle.MerkleNode, len(tree.levels[level]))
+		children := tree.levels[level-1]
+		for parentIndex := range nodes {
+			leftIndex := parentIndex * 2
+			rightIndex := leftIndex + 1
+			parent := merkle.MerkleNode{
+				Level: level,
+				Index: int64(parentIndex),
+				Hash:  children[leftIndex].Hash,
+			}
+			if rightIndex < len(children) {
+				if err := parent.ComputeInternalHash("HBPFREGINT", children[leftIndex].Hash, children[rightIndex].Hash); err != nil {
+					return nil, err
+				}
+			}
+			nodes[parentIndex] = parent
+			tree.levels[level][parentIndex] = parent
+		}
+		updates[level-1] = nodes
+	}
+	return updates, nil
+}
+
+func (tree *RegionHBPF) Commitment(shardHashes [][32]byte, shardBFs []*BloomFilter) ([][]merkle.MerkleNode, error) {
+	if tree == nil || tree.MerkleTree == nil {
+		return nil, fmt.Errorf("commit region bloom filter tree: tree is nil")
+	}
+	if len(shardHashes) != int(tree.LeafCount) {
+		return nil, fmt.Errorf("commit region bloom filter tree: got %d shard hashes, want %d", len(shardHashes), tree.LeafCount)
+	}
+	if len(shardBFs) != int(tree.LeafCount) {
+		return nil, fmt.Errorf("commit region bloom filter tree: got %d shard filters, want %d", len(shardBFs), tree.LeafCount)
+	}
+	type result struct {
+		updates [][]merkle.MerkleNode
+		err     error
+	}
+	results := make(chan result, 2)
+	go func() {
+		for _, shardBF := range shardBFs {
+			if err := tree.updateBloomFilter(shardBF); err != nil {
+				results <- result{err: err}
+				return
+			}
+		}
+		results <- result{}
+	}()
+
+	//update shardHashes in RegionHBPF
+	for i, hash := range shardHashes {
+		tree.levels[0][i] = merkle.MerkleNode{
+			Level: 0,
+			Index: int64(i),
+			Hash:  hash,
+		}
+	}
+
+	go func() {
+		updates, err := tree.updateInternalNodes()
+		results <- result{updates: updates, err: err}
+	}()
+
+	var updates [][]merkle.MerkleNode
+	var resultErr error
+	//check no error
+	for range 2 {
+		completed := <-results
+		if completed.err != nil && resultErr == nil {
+			resultErr = completed.err
+		}
+		if completed.updates != nil {
+			updates = completed.updates
+		}
+	}
+	if resultErr != nil {
+		return nil, resultErr
+	}
+
+	tree.Root = tree.levels[tree.Height][0].Hash
+	return updates, nil
+}
+
+func (tree *RegionHBPF) PruneShards(tokens [][3][]byte) []merkle.TreeID {
+	if tree == nil || tree.MerkleTree == nil {
+		return nil
+	}
+
+	var matches []merkle.TreeID
+	for shardID, shard := range tree.Shards {
+		if shard == nil || shard.bloomFilter == nil || shard.RegionID != tree.TreeID.RegionID {
+			continue
+		}
+		for _, tokenGroup := range tokens {
+			containsAll := true
+			for _, token := range tokenGroup {
+				if !shard.bloomFilter.Contains(token) {
+					containsAll = false
+					break
+				}
+			}
+			if containsAll {
+				matches = append(matches, merkle.TreeID{
+					Type:     merkle.TreeShard,
+					RegionID: tree.TreeID.RegionID,
+					ShardID:  shardID,
+				})
+				break
+			}
+		}
+	}
+	return matches
+}

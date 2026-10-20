@@ -11,11 +11,10 @@ type ShardHPBF struct {
 	RegionID    string
 	ShardID     int64
 	bloomFilter *BloomFilter
+	RootHash    [32]byte
 }
 
-type shardBfTree = ShardHPBF
-
-func newShardBfTree(regionID string, shardID int64, n int, p float64) (*shardBfTree, error) {
+func newShardHPBF(regionID string, shardID int64, n int, p float64) (*ShardHPBF, error) {
 	bf, err := newBloomFilter(n, p)
 	if err != nil {
 		return nil, err
@@ -78,13 +77,13 @@ func (s *ShardHPBF) Contains(siteID, devID, typ string) (bool, error) {
 }
 
 // Commitment hashes the shard Bloom filter state for the given epoch.
-func (s *ShardHPBF) Commitment(epoch uint64) ([32]byte, error) {
+func (s *ShardHPBF) Commitment(epoch uint64) ([32]byte, *BloomFilter, error) {
 	if s == nil || s.bloomFilter == nil {
-		return [32]byte{}, fmt.Errorf("shard bloom filter is nil")
+		return [32]byte{}, nil, fmt.Errorf("shard bloom filter is nil")
 	}
 	bf := s.bloomFilter
 	if bf.m == 0 || bf.k == 0 || uint64(len(bf.bits)) != (bf.m-1)/64+1 {
-		return [32]byte{}, fmt.Errorf("shard bloom filter is invalid")
+		return [32]byte{}, nil, fmt.Errorf("shard bloom filter is invalid")
 	}
 
 	bfParts := make([]any, 0, 2+len(bf.bits))
@@ -94,13 +93,14 @@ func (s *ShardHPBF) Commitment(epoch uint64) ([32]byte, error) {
 	}
 	encodedBF, err := domain.Serialize(bfParts...)
 	if err != nil {
-		return [32]byte{}, err
+		return [32]byte{}, nil, err
 	}
 	encoded, err := domain.Serialize(
 		[]byte("SHBF"), epoch, s.RegionID, uint64(s.ShardID), encodedBF,
 	)
 	if err != nil {
-		return [32]byte{}, err
+		return [32]byte{}, nil, err
 	}
-	return sha256.Sum256(encoded), nil
+	s.RootHash = sha256.Sum256(encoded)
+	return s.RootHash, bf, nil
 }
