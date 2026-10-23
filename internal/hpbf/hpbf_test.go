@@ -3,6 +3,7 @@ package hpbf
 import (
 	"crypto/sha256"
 	"fmt"
+	"reflect"
 	"slices"
 	"strconv"
 	"testing"
@@ -59,7 +60,7 @@ func TestHPBFCommitmentAndWorkingEpoch(t *testing.T) {
 		t.Fatal(err)
 	}
 	workingShard := h.Working.Global.Regions[regionID].Shards[shardID]
-	if contains, err := workingShard.Contains(site, dev, typ); err != nil || !contains {
+	if contains, _, err := workingShard.Contains(site, dev, typ); err != nil || !contains {
 		t.Fatalf("new log missing from Working: contains=%v, err=%v", contains, err)
 	}
 	if h.Finalized != first || first.Global.RootHash != root0 {
@@ -94,12 +95,14 @@ func TestHPBFCommitmentAndWorkingEpoch(t *testing.T) {
 	if first.Global.RootHash != root0 {
 		t.Fatal("second commitment changed the previous finalized root")
 	}
-	if !slices.Contains(h.CandidateShards(testTokens(t, site, dev, typ)), merkle.TreeID{
+	_, newLogShards, _ := h.CandidateRegionShards(testTokens(t, site, dev, typ))
+	if !slices.Contains(newLogShards, merkle.TreeID{
 		Type: merkle.TreeShard, RegionID: regionID, ShardID: shardID,
 	}) {
 		t.Fatal("newly finalized log did not identify its shard")
 	}
-	if !slices.Contains(h.CandidateShards(testTokens(t, "site-0", "dev-0", "type-0")), merkle.TreeID{
+	_, oldLogShards, _ := h.CandidateRegionShards(testTokens(t, "site-0", "dev-0", "type-0"))
+	if !slices.Contains(oldLogShards, merkle.TreeID{
 		Type: merkle.TreeShard, RegionID: "0", ShardID: 0,
 	}) {
 		t.Fatal("old log did not remain searchable in the new finalized epoch")
@@ -182,6 +185,180 @@ func TestHPBFReturnedPartitionsAreCumulative(t *testing.T) {
 	}
 	if !slices.Equal(shards0[0].BloomFilter.bits, firstBits) {
 		t.Fatal("second commitment changed the returned epoch 0 partition")
+	}
+}
+
+func TestHPBFProofGenerationAndReturn(t *testing.T) {
+	h, err := NewHPBF(3, 3, 64, 0.0001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range []struct {
+		region string
+		shard  int64
+		site   string
+	}{
+		{"0", 0, "site-a"},
+		{"0", 2, "site-b"},
+		{"1", 1, "site-c"},
+		{"2", 2, "site-d"},
+	} {
+		if err := h.AddToken(entry.region, entry.shard, entry.site, "device", "type"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shardPartitions, regionPartitions, globalPartition, err := h.Commitment(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tokens := testTokens(t, "site-b", "device", "type")
+	candidateRegions, candidateShards, proof := h.CandidateRegionShards(tokens)
+	if proof.TreeID != (merkle.TreeID{Type: merkle.TreeGlobal}) || proof.Epoch != 0 ||
+		len(proof.Regions) != 3 {
+		t.Fatal("global proof has incorrect identity, epoch, or region count")
+	}
+
+	regionRoots := make([][32]byte, 3)
+	var wantRegions, wantShards []merkle.TreeID
+	for regionIndex, regionProof := range proof.Regions {
+		regionID := strconv.Itoa(regionIndex)
+		if regionProof.TreeID != (merkle.TreeID{Type: merkle.TreeRegion, RegionID: regionID}) ||
+			len(regionProof.Shards) != 3 ||
+			!slices.Equal(regionProof.bits, regionPartitions[regionIndex].BloomFilter.bits) {
+			t.Fatalf("region %s proof is incomplete", regionID)
+		}
+		shardHashes := make([][32]byte, 3)
+		regionMatches := true
+		for _, token := range tokens {
+			if !regionProof.BloomFilter.Contains(token) {
+				regionMatches = false
+				break
+			}
+		}
+		if regionMatches {
+			wantRegions = append(wantRegions, regionProof.TreeID)
+		}
+		for shardIndex, shardProof := range regionProof.Shards {
+			partition := shardPartitions[regionIndex*3+shardIndex]
+			if shardProof.TreeID != (merkle.TreeID{Type: merkle.TreeShard, RegionID: regionID, ShardID: int64(shardIndex)}) ||
+				!slices.Equal(shardProof.bits, partition.BloomFilter.bits) {
+				t.Fatalf("region %s shard %d proof differs from its partition", regionID, shardIndex)
+			}
+			shardHashes[shardIndex] = proofShardHash(t, proof.Epoch, shardProof)
+			if shardHashes[shardIndex] != partition.Commitment {
+				t.Fatalf("region %s shard %d proof hashes incorrectly", regionID, shardIndex)
+			}
+			if regionMatches {
+				matches := true
+				for _, token := range tokens {
+					if !shardProof.BloomFilter.Contains(token) {
+						matches = false
+						break
+					}
+				}
+				if matches {
+					wantShards = append(wantShards, shardProof.TreeID)
+				}
+			}
+		}
+		wantLevels := proofMerkleLevels(t, "HBPFREGINT", shardHashes)
+		if !reflect.DeepEqual(regionProof.Levels, wantLevels) ||
+			wantLevels[len(wantLevels)-1][0] != regionPartitions[regionIndex].RootHash {
+			t.Fatalf("region %s proof does not recompute its Merkle root", regionID)
+		}
+		regionRoots[regionIndex] = regionPartitions[regionIndex].RootHash
+	}
+	wantGlobalLevels := proofMerkleLevels(t, "HBPFGLOBALINT", regionRoots)
+	if !reflect.DeepEqual(proof.Levels, wantGlobalLevels) ||
+		wantGlobalLevels[len(wantGlobalLevels)-1][0] != globalPartition.RootHash {
+		t.Fatal("global proof does not recompute its Merkle root")
+	}
+	checkSameTreeIDs(t, candidateRegions, wantRegions)
+	checkSameTreeIDs(t, candidateShards, wantShards)
+	if !slices.Contains(candidateRegions, merkle.TreeID{Type: merkle.TreeRegion, RegionID: "0"}) ||
+		!slices.Contains(candidateShards, merkle.TreeID{Type: merkle.TreeShard, RegionID: "0", ShardID: 2}) {
+		t.Fatal("query did not return the region and shard containing the log")
+	}
+
+	// Proof data must remain stable while the next epoch receives logs.
+	shardBits := slices.Clone(proof.Regions[0].Shards[2].bits)
+	if err := h.AddToken("0", 2, "later", "device", "type"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(proof.Regions[0].Shards[2].bits, shardBits) {
+		t.Fatal("working epoch changed the returned shard proof")
+	}
+	globalLeaf := h.Finalized.Global.levels[0][0].Hash
+	proof.Levels[0][0][0] ^= 1
+	if h.Finalized.Global.levels[0][0].Hash != globalLeaf {
+		t.Fatal("returned Merkle levels share storage with the finalized tree")
+	}
+	finalizedRegion := h.Finalized.Global.Regions["0"]
+	regionWord := finalizedRegion.BloomFilter.bits[0]
+	proof.Regions[0].bits[0] ^= 1
+	if finalizedRegion.BloomFilter.bits[0] != regionWord {
+		t.Fatal("returned region filter shares storage with the finalized tree")
+	}
+	shardWord := finalizedRegion.Shards[2].bloomFilter.bits[0]
+	proof.Regions[0].Shards[2].bits[0] ^= 1
+	if finalizedRegion.Shards[2].bloomFilter.bits[0] != shardWord {
+		t.Fatal("returned shard filter shares storage with the finalized tree")
+	}
+	regionLeaf := finalizedRegion.levels[0][0].Hash
+	proof.Regions[0].Levels[0][0][0] ^= 1
+	if finalizedRegion.levels[0][0].Hash != regionLeaf {
+		t.Fatal("returned region levels share storage with the finalized tree")
+	}
+}
+
+func proofShardHash(t *testing.T, epoch uint64, proof ShardHPBFProof) [32]byte {
+	t.Helper()
+	parts := []any{proof.m, proof.k}
+	for _, word := range proof.bits {
+		parts = append(parts, word)
+	}
+	encodedBF, err := domain.Serialize(parts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := domain.Serialize([]byte("SHBF"), epoch, proof.RegionID, uint64(proof.ShardID), encodedBF)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sha256.Sum256(encoded)
+}
+
+func proofMerkleLevels(t *testing.T, tag string, leaves [][32]byte) [][][32]byte {
+	t.Helper()
+	levels := [][][32]byte{slices.Clone(leaves)}
+	for len(levels[len(levels)-1]) > 1 {
+		children := levels[len(levels)-1]
+		parents := make([][32]byte, (len(children)+1)/2)
+		for i := range parents {
+			parents[i] = children[2*i]
+			if 2*i+1 < len(children) {
+				encoded, err := domain.Serialize([]byte(tag), children[2*i][:], children[2*i+1][:])
+				if err != nil {
+					t.Fatal(err)
+				}
+				parents[i] = sha256.Sum256(encoded)
+			}
+		}
+		levels = append(levels, parents)
+	}
+	return levels
+}
+
+func checkSameTreeIDs(t *testing.T, got, want []merkle.TreeID) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("candidate IDs = %v, want %v", got, want)
+	}
+	for _, id := range want {
+		if !slices.Contains(got, id) {
+			t.Fatalf("candidate IDs = %v, missing %v", got, id)
+		}
 	}
 }
 

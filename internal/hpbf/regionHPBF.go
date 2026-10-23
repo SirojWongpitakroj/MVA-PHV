@@ -3,11 +3,12 @@ package hpbf
 import (
 	"fmt"
 	"math/bits"
+	"slices"
 
 	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
 )
 
-type RegionHBPF struct {
+type RegionHPBF struct {
 	*merkle.MerkleTree
 	levels [][]merkle.MerkleNode
 	Shards map[int64]*ShardHPBF
@@ -15,7 +16,7 @@ type RegionHBPF struct {
 	*BloomFilter
 }
 
-func NewRegionHBPF(regionID string, numShards, n int, p float64) (*RegionHBPF, error) {
+func NewRegionHPBF(regionID string, numShards, n int, p float64) (*RegionHPBF, error) {
 	if numShards <= 0 {
 		return nil, fmt.Errorf("new region bloom filter tree: numShards must be positive")
 	}
@@ -25,7 +26,7 @@ func NewRegionHBPF(regionID string, numShards, n int, p float64) (*RegionHBPF, e
 	}
 
 	height := bits.Len(uint(numShards - 1))
-	tree := &RegionHBPF{
+	tree := &RegionHPBF{
 		MerkleTree: &merkle.MerkleTree{
 			TreeID: merkle.TreeID{
 				Type:     merkle.TreeRegion,
@@ -47,7 +48,7 @@ func NewRegionHBPF(regionID string, numShards, n int, p float64) (*RegionHBPF, e
 	return tree, nil
 }
 
-func (tree *RegionHBPF) updateBloomFilter(shardBF *BloomFilter) error {
+func (tree *RegionHPBF) updateBloomFilter(shardBF *BloomFilter) error {
 	if tree == nil {
 		return fmt.Errorf("update region bloom filter: region bloom filter is nil")
 	}
@@ -60,7 +61,7 @@ func (tree *RegionHBPF) updateBloomFilter(shardBF *BloomFilter) error {
 	return tree.BloomFilter.Merge(*shardBF)
 }
 
-func (tree *RegionHBPF) updateInternalNodes() ([][]merkle.MerkleNode, error) {
+func (tree *RegionHPBF) updateInternalNodes() ([][]merkle.MerkleNode, error) {
 	updates := make([][]merkle.MerkleNode, tree.Height)
 	for level := 1; level <= tree.Height; level++ {
 		nodes := make([]merkle.MerkleNode, len(tree.levels[level]))
@@ -86,7 +87,7 @@ func (tree *RegionHBPF) updateInternalNodes() ([][]merkle.MerkleNode, error) {
 	return updates, nil
 }
 
-func (tree *RegionHBPF) Commitment(shardHashes [][32]byte, shardBFs []*BloomFilter, epoch, index uint64) (RegionHPBFPartition, error) {
+func (tree *RegionHPBF) Commitment(shardHashes [][32]byte, shardBFs []*BloomFilter, epoch, index uint64) (RegionHPBFPartition, error) {
 	if tree == nil || tree.MerkleTree == nil {
 		return RegionHPBFPartition{}, fmt.Errorf("commit region bloom filter tree: tree is nil")
 	}
@@ -111,7 +112,7 @@ func (tree *RegionHBPF) Commitment(shardHashes [][32]byte, shardBFs []*BloomFilt
 		results <- result{}
 	}()
 
-	//update shardHashes in RegionHBPF
+	//update shardHashes in RegionHPBF
 	for i, hash := range shardHashes {
 		tree.levels[0][i] = merkle.MerkleNode{
 			Level: 0,
@@ -152,16 +153,49 @@ func (tree *RegionHBPF) Commitment(shardHashes [][32]byte, shardBFs []*BloomFilt
 	}, nil
 }
 
-func (tree *RegionHBPF) PruneShards(tokens [3][]byte) []merkle.TreeID {
+func (tree *RegionHPBF) generateProof() (RegionHPBFProof, error) {
 	if tree == nil || tree.MerkleTree == nil {
-		return nil
+		return RegionHPBFProof{}, fmt.Errorf("generate region proof: tree is nil")
+	}
+	if tree.Height < 0 || tree.BloomFilter == nil || len(tree.Shards) != int(tree.LeafCount) || len(tree.levels) != tree.Height+1 ||
+		len(tree.levels[tree.Height]) != 1 || tree.Root == ([32]byte{}) ||
+		tree.levels[tree.Height][0].Hash != tree.Root {
+		return RegionHPBFProof{}, fmt.Errorf("generate region proof: tree is incomplete")
+	}
+
+	proof := RegionHPBFProof{
+		TreeID:      tree.TreeID,
+		BloomFilter: *tree.BloomFilter.Clone(),
+		Shards:      make([]ShardHPBFProof, 0, len(tree.Shards)),
+		Levels:      copyMerkleLevels(tree.levels),
+	}
+	shardIDs := make([]int64, 0, len(tree.Shards))
+	for shardID := range tree.Shards {
+		shardIDs = append(shardIDs, shardID)
+	}
+	slices.Sort(shardIDs)
+	for _, shardID := range shardIDs {
+		shard := tree.Shards[shardID]
+		if shard == nil || shard.bloomFilter == nil || shard.TreeID.Type != merkle.TreeShard ||
+			shard.RegionID != tree.TreeID.RegionID || shard.ShardID != shardID {
+			return RegionHPBFProof{}, fmt.Errorf("generate region proof: shard %d is invalid", shardID)
+		}
+		proof.Shards = append(proof.Shards, ShardHPBFProof{
+			TreeID:      shard.TreeID,
+			BloomFilter: *shard.bloomFilter.Clone(),
+		})
+	}
+	return proof, nil
+}
+
+func (tree *RegionHPBF) PruneShards(tokens [3][]byte) ([]merkle.TreeID, RegionHPBFProof) {
+	proof, err := tree.generateProof()
+	if err != nil {
+		return nil, RegionHPBFProof{}
 	}
 
 	var matches []merkle.TreeID
 	for shardID, shard := range tree.Shards {
-		if shard == nil || shard.bloomFilter == nil || shard.RegionID != tree.TreeID.RegionID {
-			continue
-		}
 		containsAll := true
 		for _, token := range tokens {
 			if !shard.bloomFilter.Contains(token) {
@@ -169,7 +203,7 @@ func (tree *RegionHBPF) PruneShards(tokens [3][]byte) []merkle.TreeID {
 				break
 			}
 		}
-		if containsAll {
+		if containsAll { //candidate shards
 			matches = append(matches, merkle.TreeID{
 				Type:     merkle.TreeShard,
 				RegionID: tree.TreeID.RegionID,
@@ -177,5 +211,5 @@ func (tree *RegionHBPF) PruneShards(tokens [3][]byte) []merkle.TreeID {
 			})
 		}
 	}
-	return matches
+	return matches, proof
 }

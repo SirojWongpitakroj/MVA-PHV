@@ -33,6 +33,14 @@ func newBloomFilter(n int, p float64) (*BloomFilter, error) {
 	}, nil
 }
 
+func (bf *BloomFilter) Clone() *BloomFilter {
+	return &BloomFilter{
+		bits: append([]uint64(nil), bf.bits...),
+		m:    bf.m,
+		k:    bf.k,
+	}
+}
+
 func (bf *BloomFilter) positions(token []byte) []uint64 {
 	h := xxh3.Hash128(token)
 

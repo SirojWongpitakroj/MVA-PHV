@@ -55,28 +55,35 @@ func (s *ShardHPBF) AddToken(siteID, devID, typ string) error {
 	return nil
 }
 
-// Contains reports whether all three tokens for the given attributes may be present.
-func (s *ShardHPBF) Contains(siteID, devID, typ string) (bool, error) {
+// Contains reports a possible match and returns the shard Bloom filter as proof.
+func (s *ShardHPBF) Contains(siteID, devID, typ string) (bool, ShardHPBFProof, error) {
 	if s == nil || s.bloomFilter == nil {
-		return false, fmt.Errorf("shard bloom filter is nil")
+		return false, ShardHPBFProof{}, fmt.Errorf("shard bloom filter is nil")
 	}
 
 	siteToken, err := domain.Serialize(siteID)
 	if err != nil {
-		return false, err
+		return false, ShardHPBFProof{}, err
 	}
 	siteDevToken, err := domain.Serialize(siteID, devID)
 	if err != nil {
-		return false, err
+		return false, ShardHPBFProof{}, err
 	}
 	siteDevTypeToken, err := domain.Serialize(siteID, devID, typ)
 	if err != nil {
-		return false, err
+		return false, ShardHPBFProof{}, err
 	}
 
-	return s.bloomFilter.Contains(siteToken) &&
+	contains := s.bloomFilter.Contains(siteToken) &&
 		s.bloomFilter.Contains(siteDevToken) &&
-		s.bloomFilter.Contains(siteDevTypeToken), nil
+		s.bloomFilter.Contains(siteDevTypeToken)
+	if !contains {
+		return false, ShardHPBFProof{}, nil
+	}
+	return true, ShardHPBFProof{
+		TreeID:      s.TreeID,
+		BloomFilter: *s.bloomFilter.Clone(),
+	}, nil
 }
 
 // Commitment hashes the shard Bloom filter state for the given epoch.

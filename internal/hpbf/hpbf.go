@@ -54,7 +54,7 @@ func newHPBFSnapshot(numRegions, numShards, n int, p float64, epoch uint64) (*HP
 
 	for i := range numRegions {
 		regionID := strconv.Itoa(i)
-		region, err := NewRegionHBPF(regionID, numShards, n, p)
+		region, err := NewRegionHPBF(regionID, numShards, n, p)
 		if err != nil {
 			return nil, fmt.Errorf("new HPBF: region %q: %w", regionID, err)
 		}
@@ -219,24 +219,26 @@ func (h *HPBF) Commitment(epoch uint64) ([]ShardHPBFPartition, []RegionHPBFParti
 	return shardPartitions, regionPartitions, globalPartition, nil
 }
 
-// CandidateShards searches the last finalized epoch.
-func (h *HPBF) CandidateShards(tokens [3][]byte) []merkle.TreeID {
+// CandidateRegionShards searches the last finalized epoch and returns its proof.
+func (h *HPBF) CandidateRegionShards(tokens [3][]byte) ([]merkle.TreeID, []merkle.TreeID, HPBFProof) {
 	if h == nil {
-		return nil
+		return nil, nil, HPBFProof{}
 	}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	if h.Finalized == nil || h.Finalized.Global == nil {
-		return nil
+		return nil, nil, HPBFProof{}
 	}
 
 	global := h.Finalized.Global
-	var matches []merkle.TreeID
-	for _, regionID := range global.PruneRegions(tokens) {
+	regions, proof := global.PruneRegions(tokens)
+	var shards []merkle.TreeID
+	for _, regionID := range regions {
 		region := global.Regions[regionID.RegionID]
 		if region != nil {
-			matches = append(matches, region.PruneShards(tokens)...)
+			matches, _ := region.PruneShards(tokens)
+			shards = append(shards, matches...)
 		}
 	}
-	return matches
+	return regions, shards, proof
 }

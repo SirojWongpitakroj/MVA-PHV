@@ -3,6 +3,7 @@ package hpbf
 import (
 	"fmt"
 	"math/bits"
+	"sort"
 
 	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
 )
@@ -11,7 +12,8 @@ type GlobalHPBF struct {
 	*merkle.MerkleTree
 	levels   [][]merkle.MerkleNode
 	RootHash [32]byte
-	Regions  map[string]*RegionHBPF
+	Regions  map[string]*RegionHPBF
+	epoch    uint64
 }
 
 func NewGlobalHPBF(numRegions int) (*GlobalHPBF, error) {
@@ -27,7 +29,7 @@ func NewGlobalHPBF(numRegions int) (*GlobalHPBF, error) {
 			Height:    height,
 		},
 		levels:  make([][]merkle.MerkleNode, height+1),
-		Regions: make(map[string]*RegionHBPF, numRegions),
+		Regions: make(map[string]*RegionHPBF, numRegions),
 	}
 
 	nodeCount := numRegions
@@ -87,6 +89,7 @@ func (tree *GlobalHPBF) Commitment(regionHashes [][32]byte, epoch uint64) (Globa
 
 	tree.RootHash = tree.levels[tree.Height][0].Hash
 	tree.MerkleTree.Root = tree.RootHash
+	tree.epoch = epoch
 	return GlobalHPBFPartition{
 		RootHash:      tree.RootHash,
 		InternalNodes: updates,
@@ -94,16 +97,53 @@ func (tree *GlobalHPBF) Commitment(regionHashes [][32]byte, epoch uint64) (Globa
 	}, nil
 }
 
-func (tree *GlobalHPBF) PruneRegions(tokens [3][]byte) []merkle.TreeID {
+func (tree *GlobalHPBF) generateProof() (HPBFProof, error) {
 	if tree == nil || tree.MerkleTree == nil {
-		return nil
+		return HPBFProof{}, fmt.Errorf("generate global proof: tree is nil")
+	}
+	if tree.Height < 0 || len(tree.Regions) != int(tree.LeafCount) ||
+		len(tree.levels) != tree.Height+1 || len(tree.levels[tree.Height]) != 1 ||
+		tree.RootHash == ([32]byte{}) || tree.levels[tree.Height][0].Hash != tree.RootHash {
+		return HPBFProof{}, fmt.Errorf("generate global proof: tree is incomplete")
+	}
+
+	proof := HPBFProof{
+		TreeID:  tree.TreeID,
+		Epoch:   tree.epoch,
+		Regions: make([]RegionHPBFProof, 0, len(tree.Regions)),
+		Levels:  copyMerkleLevels(tree.levels),
+	}
+	regionIDs := make([]string, 0, len(tree.Regions))
+	for regionID := range tree.Regions {
+		regionIDs = append(regionIDs, regionID)
+	}
+	sort.Strings(regionIDs)
+	if len(tree.levels[0]) != len(regionIDs) {
+		return HPBFProof{}, fmt.Errorf("generate global proof: region leaves are incomplete")
+	}
+	for index, regionID := range regionIDs {
+		region := tree.Regions[regionID]
+		if region == nil || region.TreeID.RegionID != regionID ||
+			tree.levels[0][index].Hash != region.Root {
+			return HPBFProof{}, fmt.Errorf("generate global proof: region %q has no committed leaf", regionID)
+		}
+		regionProof, err := region.generateProof()
+		if err != nil {
+			return HPBFProof{}, fmt.Errorf("generate global proof: region %q: %w", regionID, err)
+		}
+		proof.Regions = append(proof.Regions, regionProof)
+	}
+	return proof, nil
+}
+
+func (tree *GlobalHPBF) PruneRegions(tokens [3][]byte) ([]merkle.TreeID, HPBFProof) {
+	proof, err := tree.generateProof()
+	if err != nil {
+		return nil, HPBFProof{}
 	}
 
 	var matches []merkle.TreeID
 	for regionID, region := range tree.Regions {
-		if region == nil || region.BloomFilter == nil {
-			continue
-		}
 		containsAll := true
 		for _, token := range tokens {
 			if !region.BloomFilter.Contains(token) {
@@ -118,5 +158,5 @@ func (tree *GlobalHPBF) PruneRegions(tokens [3][]byte) []merkle.TreeID {
 			})
 		}
 	}
-	return matches
+	return matches, proof
 }
