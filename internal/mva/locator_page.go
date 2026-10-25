@@ -1,4 +1,4 @@
-package merkleBP
+package mva
 
 import (
 	"bytes"
@@ -9,28 +9,6 @@ import (
 
 	"github.com/SirojWongpitakroj/mva-phv/internal/domain"
 )
-
-//TODO
-
-// Page struct
-type Page struct {
-	PageID   int64
-	Hash     [32]byte
-	RegionID string
-
-	IsLeaf bool
-	Keys   []LocatorKey
-
-	Parent       *Page
-	ParentPageID *int64
-
-	//used by leaf pages
-	Values []*LocatorValue
-	Next   *Page
-
-	//used by internal pages
-	Children []*Page
-}
 
 // Boolean Search
 func (page *Page) findKeyIdx(currKey LocatorKey) int {

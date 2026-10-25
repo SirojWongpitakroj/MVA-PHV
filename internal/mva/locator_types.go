@@ -1,8 +1,9 @@
-package merkleBP
+package mva
 
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"time"
 	"uuid"
 
@@ -110,6 +111,48 @@ type LocatorKey interface {
 	Serialize() ([]byte, error)
 }
 
+// LocatorQuery compares a search request with stored locator keys. Stored
+// keys also satisfy this interface, allowing exact ID and attribute lookups.
+type LocatorQuery interface {
+	isLogViewKey() bool
+	Compare(LocatorKey) int
+}
+
+// AttrRangeQuery selects one attribute prefix within an inclusive time range.
+type AttrRangeQuery struct {
+	SiteID  string
+	DevID   string
+	Type    string
+	StartTS time.Time
+	EndTS   time.Time
+}
+
+func (AttrRangeQuery) isLogViewKey() bool { return false }
+
+// Compare returns zero for every stored key in the requested range.
+func (q AttrRangeQuery) Compare(other LocatorKey) int {
+	key, ok := other.(attrKey)
+	if !ok {
+		return 1
+	}
+	if order := strings.Compare(q.SiteID, key.SiteID); order != 0 {
+		return order
+	}
+	if order := strings.Compare(q.DevID, key.DevID); order != 0 {
+		return order
+	}
+	if order := strings.Compare(q.Type, key.Type); order != 0 {
+		return order
+	}
+	if q.StartTS.After(key.TS) {
+		return 1
+	}
+	if q.EndTS.Before(key.TS) {
+		return -1
+	}
+	return 0
+}
+
 // A_i
 type PhysicalAddress struct {
 	RegionID  string
@@ -202,4 +245,42 @@ type LocatorUpdate struct {
 	NextPageID  int64
 	Height      int
 	RecordCount int64
+}
+
+// Page struct
+type Page struct {
+	PageID   int64
+	Hash     [32]byte
+	RegionID string
+
+	IsLeaf bool
+	Keys   []LocatorKey
+
+	Parent       *Page
+	ParentPageID *int64
+
+	//used by leaf pages
+	Values []*LocatorValue
+	Prev   *Page
+	Next   *Page
+
+	//used by internal pages
+	Children []*Page
+}
+
+type PageProof struct {
+	PageID int64
+	IsLeaf bool
+
+	Keys []LocatorKey
+
+	// leaf only
+	Values []*LocatorValue
+
+	// internal only
+	ChildHashes [][32]byte
+
+	// child that auditor should replace with
+	// the hash reconstructed from lower level
+	PathChildIndicdex []int
 }
