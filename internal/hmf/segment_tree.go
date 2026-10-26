@@ -10,18 +10,6 @@ import (
 	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
 )
 
-type SegmentTree struct {
-	*merkle.MerkleTree
-	*builder
-	MaxLeaves int
-	Sealed    bool
-}
-
-// in-memory segment builder
-type builder struct {
-	levels [][]merkle.MerkleNode
-}
-
 // NewSegmentTree initiate a new MerkleTree
 func NewSegmentTree(regionID string, shardID, segmentID int64, maxLeaves int) *SegmentTree {
 	tree := &SegmentTree{
@@ -56,23 +44,24 @@ func leafHash(logID uuid.UUID, h [32]byte) ([32]byte, error) {
 
 // Append inserts a log into the mutable tree.
 func (tree *SegmentTree) Append(logID uuid.UUID, h [32]byte) error { // h = c_i
+	hash, err := leafHash(logID, h)
+	if err != nil {
+		return err
+	}
+	return tree.AppendCommitment(hash)
+}
+
+// AppendCommitment accepts the HMF leaf commitment already computed by MPM.
+func (tree *SegmentTree) AppendCommitment(commitment [32]byte) error {
 	if tree.Sealed {
 		return fmt.Errorf("append segment tree: segment tree sealed")
 	}
 	if tree.LeafCount >= int64(tree.MaxLeaves) {
 		return fmt.Errorf("append segment tree: segment tree is full")
 	}
-
-	hash, err := leafHash(logID, h)
-	if err != nil {
-		return err
-	}
 	tree.levels[0] = append(tree.levels[0], merkle.MerkleNode{
-		Level: 0,
-		Index: tree.LeafCount,
-		Hash:  hash,
+		Level: 0, Index: tree.LeafCount, Hash: commitment,
 	})
-
 	tree.LeafCount++
 	return nil
 }

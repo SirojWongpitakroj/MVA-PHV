@@ -9,12 +9,6 @@ import (
 	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
 )
 
-type RegionTree struct {
-	*merkle.MerkleTree
-	levels    [][]merkle.MerkleNode
-	numShards int
-}
-
 func NewRegionTree(regionID string, numShards int) *RegionTree {
 	if numShards <= 0 {
 		panic("new region tree: numShards must be positive")

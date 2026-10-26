@@ -9,11 +9,6 @@ import (
 	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
 )
 
-type ShardTree struct {
-	*merkle.MerkleTree
-	frontiers []merkle.MerkleNode
-}
-
 func (tree *ShardTree) popFrontier() (merkle.MerkleNode, error) {
 	frontierLen := len(tree.frontiers)
 	if frontierLen == 0 {

@@ -9,12 +9,6 @@ import (
 	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
 )
 
-type GlobalTree struct {
-	*merkle.MerkleTree
-	levels     [][]merkle.MerkleNode
-	numRegions int
-}
-
 func NewGlobalTree(numRegions int) *GlobalTree {
 	if numRegions <= 0 {
 		panic("new global tree: numRegions must be positive")
