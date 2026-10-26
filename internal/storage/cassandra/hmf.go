@@ -56,7 +56,7 @@ func (s *Store) PutActiveSegment(ctx context.Context, r ActiveSegment) error {
 	}
 	return s.exec(ctx, `INSERT INTO hmf_active_segments_by_shard
         (rid,sid,seg_id,opened_at_ns,leaf_count,next_seg_id) VALUES (?,?,?,?,?,?)`,
-		r.RegionID, r.ShardID, r.SegmentID, r.OpenedAtNS, r.LeafCount, r.NextSegmentID)
+		r.RegionID, r.ShardID, *r.SegmentID, *r.OpenedAtNS, *r.LeafCount, r.NextSegmentID)
 }
 
 // ClearActiveSegment preserves the next ID while removing the sealed Segment's

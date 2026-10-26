@@ -1,6 +1,7 @@
 -- MVA-PHV evidence and working-recovery storage for Cassandra 4.1 / 5.0.
--- This is a schema contract. The Go repository does not yet have a Cassandra
--- adapter; the caller must implement the writes and reads described below.
+-- MPMRepository maps manager writes to the Store's bound CQL methods. A
+-- concrete Cassandra Client and prepared-candidate evidence source are
+-- supplied by the application; neither is a trusted checkpoint store.
 -- Cassandra stores encrypted logs and potentially untrusted authentication
 -- evidence. Its three mutable working tables support restart recovery only.
 -- PostgreSQL, outside this schema, stores epoch orchestration, candidate and
@@ -58,6 +59,17 @@ CREATE TABLE IF NOT EXISTS logs_by_segment (
     PRIMARY KEY ((rid, sid, seg_id), leaf_id)
 ) WITH CLUSTERING ORDER BY (leaf_id ASC);
 
+-- A conditional insert reserves each LogID globally before writing its
+-- physical Segment row. This is an operational uniqueness index, not a trust
+-- anchor. A retry with the same address is idempotent; another address fails.
+CREATE TABLE IF NOT EXISTS log_addresses_by_id (
+    log_id  uuid PRIMARY KEY,
+    rid     text,
+    sid     bigint,
+    seg_id  bigint,
+    leaf_id bigint
+);
+
 -- Mutable per-Shard working recovery state, not historical evidence. Update
 -- after each HMF Insert; after sealing, clear active seg_id/opened_at_ns and
 -- leaf_count but retain next_seg_id so IDs remain monotonic across a restart.
@@ -106,8 +118,8 @@ CREATE TABLE IF NOT EXISTS hmf_segment_nodes (
 -- Changed finalized/candidate nodes only. tree_kind is SHARD, REGION, GLOBAL.
 -- REGION uses sid=-1; GLOBAL uses rid='' and sid=-1. node_bucket is
 -- floor(node_index / 4096); tune the bucket size with production measurements.
--- HMF currently calculates sparse Region/Global paths internally; a storage
--- adapter will need to expose changed nodes to populate this table.
+-- HMF currently calculates sparse Region/Global paths internally; its
+-- candidate evidence source must export changed nodes for this table.
 CREATE TABLE IF NOT EXISTS hmf_hierarchy_nodes (
     tree_kind       text,
     rid             text,

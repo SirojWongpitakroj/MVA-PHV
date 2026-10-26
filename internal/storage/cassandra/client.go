@@ -14,6 +14,13 @@ type Client interface {
 	Query(ctx context.Context, statement string, args ...any) (Rows, error)
 }
 
+// ConditionalClient performs a Cassandra lightweight transaction at SERIAL
+// consistency and reports whether its IF NOT EXISTS condition was applied.
+// MPMRepository requires this for durable LogID uniqueness.
+type ConditionalClient interface {
+	ExecIfNotExists(ctx context.Context, statement string, args ...any) (bool, error)
+}
+
 // Rows follows the usual forward-only driver cursor contract. Nullable bigint
 // columns scan into **int64 (nil for CQL null). Scan must copy blob values into
 // destinations, since the cursor may reuse its buffers.
