@@ -121,6 +121,7 @@ func (snapshot *RegionMVASnapshot) resolve(query LocatorQuery) ([]*LocatorValue,
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve MVA: %w", err)
 	}
+	proof.IDRoot, proof.AttrRoot, proof.RegionRoot = snapshot.IDView.RootHash, snapshot.AttrView.RootHash, snapshot.Root
 	result := make([]*LocatorValue, len(values))
 	for i, value := range values {
 		result[i] = cloneLocatorValue(value)

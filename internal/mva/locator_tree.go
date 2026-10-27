@@ -81,6 +81,7 @@ func (tree *LocatorTree) insertParent(currPage, rightPage *Page,
 	if parent == nil {
 		parent = &Page{
 			PageID:   tree.NextPageID,
+			RegionID: currPage.RegionID,
 			IsLeaf:   false,
 			Keys:     make([]LocatorKey, 0, tree.Order-1),
 			Children: make([]*Page, 0, tree.Order),
@@ -136,6 +137,7 @@ func (tree *LocatorTree) internalSplit(currPage *Page, updates pageUpdates) erro
 
 	rightPage := &Page{
 		PageID:       tree.NextPageID,
+		RegionID:     currPage.RegionID,
 		IsLeaf:       false,
 		Parent:       currPage.Parent,
 		ParentPageID: pageIDPointer(currPage.Parent),
@@ -176,6 +178,7 @@ func (tree *LocatorTree) leafSplit(currPage *Page, updates pageUpdates) error {
 
 	rightPage := &Page{
 		PageID:       tree.NextPageID,
+		RegionID:     currPage.RegionID,
 		IsLeaf:       true,
 		Parent:       currPage.Parent,
 		ParentPageID: pageIDPointer(currPage.Parent),
@@ -321,6 +324,23 @@ func leafPathProof(page *Page) (PageProof, error) {
 	}, nil
 }
 
+func proofToLeaf(page *Page) ([]PageProof, error) {
+	leaf, err := leafPathProof(page)
+	if err != nil {
+		return nil, err
+	}
+	path := []PageProof{leaf}
+	for child := page; child.Parent != nil; child = child.Parent {
+		index := slices.Index(child.Parent.Children, child)
+		step, err := internalPathStep(child.Parent, index)
+		if err != nil {
+			return nil, err
+		}
+		path = append(path, step.proof)
+	}
+	return path, nil
+}
+
 // nextLeafDescent advances the saved descent to the next leaf without using
 // Parent pointers. The leaf link is checked by the caller.
 func nextLeafDescent(path []locatorDescentStep) ([]locatorDescentStep, *Page, error) {
@@ -360,6 +380,9 @@ func (tree *LocatorTree) resolve(query LocatorQuery) ([]*LocatorValue, MVARegion
 		return nil, proof, fmt.Errorf("resolve locator: query is nil")
 	}
 	if rangeQuery, ok := query.(AttrRangeQuery); ok && rangeQuery.EndTS.Before(rangeQuery.StartTS) {
+		return nil, proof, fmt.Errorf("resolve locator: end timestamp precedes start timestamp")
+	}
+	if rangeQuery, ok := query.(TimeRangeQuery); ok && rangeQuery.EndTS.Before(rangeQuery.StartTS) {
 		return nil, proof, fmt.Errorf("resolve locator: end timestamp precedes start timestamp")
 	}
 	if query.isLogViewKey() {
@@ -417,6 +440,15 @@ scan:
 		if len(page.Keys) != len(page.Values) {
 			return nil, proof, fmt.Errorf("resolve locator: invalid leaf page %d", page.PageID)
 		}
+		leafForScan, err := leafPathProof(page)
+		if err != nil {
+			return nil, proof, err
+		}
+		scanPath := []PageProof{leafForScan}
+		for i := len(descent) - 1; i >= 0; i-- {
+			scanPath = append(scanPath, descent[i].proof)
+		}
+		proof.ScanPaths = append(proof.ScanPaths, scanPath)
 		var leafProof PageProof
 		leafProofReady := false
 		for idx < len(page.Keys) {
@@ -424,7 +456,7 @@ scan:
 			if order < 0 {
 				break scan
 			}
-			if order == 0 {
+			if Matches(query, page.Keys[idx]) {
 				if firstPage == nil {
 					firstPage, firstIndex = page, idx
 				}
@@ -461,16 +493,34 @@ scan:
 		idx = 0
 	}
 
-	if firstPage != nil {
+	if firstPage != nil && !isTimeOnly(query) {
+		var leftPage, rightPage *Page
 		if firstIndex > 0 {
 			proof.LeftBoundary = firstPage.Values[firstIndex-1]
+			leftPage = firstPage
 		} else if firstPage.Prev != nil && len(firstPage.Prev.Values) > 0 {
 			proof.LeftBoundary = firstPage.Prev.Values[len(firstPage.Prev.Values)-1]
+			leftPage = firstPage.Prev
 		}
 		if lastIndex+1 < len(lastPage.Values) {
 			proof.RightBoundary = lastPage.Values[lastIndex+1]
+			rightPage = lastPage
 		} else if lastPage.Next != nil && len(lastPage.Next.Values) > 0 {
 			proof.RightBoundary = lastPage.Next.Values[0]
+			rightPage = lastPage.Next
+		}
+		var err error
+		if leftPage != nil {
+			proof.LeftBoundaryPath, err = proofToLeaf(leftPage)
+			if err != nil {
+				return nil, proof, err
+			}
+		}
+		if rightPage != nil {
+			proof.RightBoundaryPath, err = proofToLeaf(rightPage)
+			if err != nil {
+				return nil, proof, err
+			}
 		}
 	}
 	return matchedValues, proof, nil

@@ -28,7 +28,11 @@ func TestSegmentAppendHashesLeaf(t *testing.T) {
 	if got := hex.EncodeToString(updates[0].Hash[:]); got != want {
 		t.Fatalf("leaf hash = %s, want %s", got, want)
 	}
-	if tree.Root != updates[0].Hash {
-		t.Fatal("single-leaf root differs from its leaf hash")
+	wantRoot, err := RootHash(tree.TreeID, tree.LeafCount, updates[0].Hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tree.Root != wantRoot {
+		t.Fatal("single-leaf root does not wrap its leaf hash")
 	}
 }

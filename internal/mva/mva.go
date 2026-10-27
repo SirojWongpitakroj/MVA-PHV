@@ -178,6 +178,10 @@ func (mva *MVA) Resolve(query LocatorQuery, candidateRegions []merkle.TreeID) ([
 		Regions: make(map[string]*MVARegionProof),
 	}
 	seen := make(map[string]bool, len(candidateRegions))
+	regionIndexes := make(map[string]int, len(mva.Regions))
+	for i, region := range mva.Regions {
+		regionIndexes[region.RegionID] = i
+	}
 	for _, candidate := range candidateRegions {
 		if candidate.Type != merkle.TreeRegion {
 			return nil, nil, fmt.Errorf("resolve MVA: candidate %q is not a region", candidate.RegionID)
@@ -194,9 +198,7 @@ func (mva *MVA) Resolve(query LocatorQuery, candidateRegions []merkle.TreeID) ([
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve MVA: region %q: %w", region.TreeID.RegionID, err)
 		}
-		if len(matched) == 0 {
-			continue
-		}
+		regionProof.RegionIndex = regionIndexes[candidate.RegionID]
 		values = append(values, matched...)
 		proof.Regions[region.TreeID.RegionID] = regionProof
 	}

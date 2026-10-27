@@ -118,6 +118,62 @@ type LocatorQuery interface {
 	Compare(LocatorKey) int
 }
 
+// LogIDQuery selects one record through the finalized Log-ID view.
+type LogIDQuery struct{ ID uuid.UUID }
+
+func (LogIDQuery) isLogViewKey() bool             { return true }
+func (q LogIDQuery) Compare(other LocatorKey) int { return q.ID.Compare(other.LogID()) }
+
+// SiteQuery and SiteDeviceQuery select the complete authenticated attribute
+// prefix. Time-limited queries require AttrRangeQuery's full attribute key.
+type SiteQuery struct{ SiteID string }
+
+func (SiteQuery) isLogViewKey() bool { return false }
+func (q SiteQuery) Compare(other LocatorKey) int {
+	k, ok := other.(attrKey)
+	if !ok {
+		return 1
+	}
+	return strings.Compare(q.SiteID, k.SiteID)
+}
+
+type SiteDeviceQuery struct{ SiteID, DevID string }
+
+func (SiteDeviceQuery) isLogViewKey() bool { return false }
+func (q SiteDeviceQuery) Compare(other LocatorKey) int {
+	k, ok := other.(attrKey)
+	if !ok {
+		return 1
+	}
+	if order := strings.Compare(q.SiteID, k.SiteID); order != 0 {
+		return order
+	}
+	return strings.Compare(q.DevID, k.DevID)
+}
+
+// TimeRangeQuery is a correctness path when no attribute prefix is supplied.
+// The existing attribute tree is not time-ordered globally, so MVA must scan
+// every authenticated attribute leaf for this query.
+type TimeRangeQuery struct{ StartTS, EndTS time.Time }
+
+func (TimeRangeQuery) isLogViewKey() bool { return false }
+func (TimeRangeQuery) Compare(other LocatorKey) int {
+	if _, ok := other.(attrKey); ok {
+		return 0
+	}
+	return 1
+}
+
+func Matches(query LocatorQuery, key LocatorKey) bool {
+	if q, ok := query.(TimeRangeQuery); ok {
+		stored, ok := key.(attrKey)
+		return ok && !stored.TS.Before(q.StartTS) && !stored.TS.After(q.EndTS)
+	}
+	return query != nil && query.Compare(key) == 0
+}
+
+func isTimeOnly(query LocatorQuery) bool { _, ok := query.(TimeRangeQuery); return ok }
+
 // AttrRangeQuery selects one attribute prefix within an inclusive time range.
 type AttrRangeQuery struct {
 	SiteID  string
@@ -166,6 +222,47 @@ type LocatorValue struct {
 	LocatorKey
 	PhysicalAddress
 	LeafHash [32]byte //c_i; MPM will have to pass in this
+}
+
+// DecodeStoredKey and DecodeStoredValue reconstruct the existing canonical
+// page encoding used by historical evidence repositories.
+func DecodeStoredKey(view ViewType, data []byte) (LocatorKey, error) {
+	switch view {
+	case ViewID:
+		var id uuid.UUID
+		if err := domain.Deserialize(data, &id); err != nil {
+			return nil, err
+		}
+		return idKey{ID: id}, nil
+	case ViewAttribute:
+		var key attrKey
+		if err := domain.Deserialize(data, &key.SiteID, &key.DevID, &key.Type, &key.TS, &key.ID); err != nil {
+			return nil, err
+		}
+		return key, nil
+	default:
+		return nil, fmt.Errorf("decode MVA key: invalid view %q", view)
+	}
+}
+
+func DecodeStoredValue(view ViewType, keyBytes, valueBytes []byte) (*LocatorValue, error) {
+	key, err := DecodeStoredKey(view, keyBytes)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.HasPrefix(valueBytes, keyBytes) {
+		return nil, fmt.Errorf("decode MVA value: key mismatch")
+	}
+	value := &LocatorValue{LocatorKey: key}
+	var commitment []byte
+	if err := domain.Deserialize(valueBytes[len(keyBytes):], &value.RegionID, &value.ShardID, &value.SegmentID, &value.LeafID, &commitment); err != nil {
+		return nil, err
+	}
+	if len(commitment) != 32 {
+		return nil, fmt.Errorf("decode MVA value: invalid locator commitment length")
+	}
+	copy(value.LeafHash[:], commitment)
+	return value, nil
 }
 
 func (v LocatorValue) Serialize() ([]byte, error) {

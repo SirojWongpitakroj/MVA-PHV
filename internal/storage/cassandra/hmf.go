@@ -151,6 +151,24 @@ func (s *Store) GetSegmentNodes(ctx context.Context, key SegmentKey) (nodes []Me
 	return nodes, err
 }
 
+// GetSegmentNode reads one immutable proof position without loading a whole
+// Segment partition. PHV decides the unique positions before calling it.
+func (s *Store) GetSegmentNode(ctx context.Context, key SegmentKey, level int32, index int64) (node MerkleNodeRecord, err error) {
+	if level < 0 || index < 0 {
+		return node, fmt.Errorf("cassandra: invalid Segment node position")
+	}
+	node.Level, node.Index = level, index
+	var hash []byte
+	err = s.one(ctx, `SELECT node_hash FROM hmf_segment_nodes
+        WHERE rid=? AND sid=? AND seg_id=? AND level=? AND node_index=?`,
+		[]any{key.RegionID, key.ShardID, key.SegmentID, level, index}, func(rows Rows) error { return rows.Scan(&hash) })
+	if err != nil {
+		return node, err
+	}
+	node.Hash, err = parseHash(hash, "Segment node hash")
+	return node, err
+}
+
 func hierarchyID(kind, rid string, sid int64) (string, int64, error) {
 	switch kind {
 	case "SHARD":

@@ -73,13 +73,19 @@ type MVAProof struct {
 }
 
 type MVARegionProof struct {
-	View  ViewType
-	Query LocatorQuery
+	View                         ViewType
+	Query                        LocatorQuery
+	RegionIndex                  int
+	IDRoot, AttrRoot, RegionRoot [32]byte
+	// ScanPaths authenticate every consecutive leaf inspected by the range
+	// search, including the insertion leaf for an empty result.
+	ScanPaths [][]PageProof
 
 	// authenticated B+ tree pages / nodes
 	Path []PageProof
 
 	// for range / attribute completeness
-	LeftBoundary  *LocatorValue
-	RightBoundary *LocatorValue
+	LeftBoundary                        *LocatorValue
+	RightBoundary                       *LocatorValue
+	LeftBoundaryPath, RightBoundaryPath []PageProof
 }

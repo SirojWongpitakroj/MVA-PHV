@@ -49,6 +49,16 @@ func (bf *BloomFilter) Snapshot() (m, k uint64, words []uint64) {
 	return bf.m, bf.k, append([]uint64(nil), bf.bits...)
 }
 
+// RestoreBloomFilter reconstructs detached proof content without sharing its
+// word slice with a working or finalized filter.
+func RestoreBloomFilter(m, k uint64, words []uint64) (BloomFilter, error) {
+	if m == 0 || k == 0 || k > m || m > uint64(math.MaxInt) ||
+		uint64(len(words)) != (m+63)/64 {
+		return BloomFilter{}, fmt.Errorf("restore bloom filter: invalid dimensions")
+	}
+	return BloomFilter{bits: append([]uint64(nil), words...), m: m, k: k}, nil
+}
+
 func (bf *BloomFilter) positions(token []byte) []uint64 {
 	h := xxh3.Hash128(token)
 

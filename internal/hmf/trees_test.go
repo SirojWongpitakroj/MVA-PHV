@@ -54,6 +54,15 @@ func testRoot(tag string, leaves [][32]byte) ([32]byte, int) {
 	return level[0], height
 }
 
+func testWrappedRoot(t *testing.T, id merkle.TreeID, count int, top [32]byte) [32]byte {
+	t.Helper()
+	root, err := RootHash(id, int64(count), top)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 func testInputHashes(n int) [][32]byte {
 	hashes := make([][32]byte, n)
 	for i := range hashes {
@@ -81,7 +90,8 @@ func TestSegmentTreeRootsAndLifecycle(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantRoot, wantHeight := testRoot("SEGINT", leaves)
+			wantTop, wantHeight := testRoot("SEGINT", leaves)
+			wantRoot := testWrappedRoot(t, tree.TreeID, count, wantTop)
 			if tree.Root != wantRoot || tree.Height != wantHeight || tree.LeafCount != int64(count) {
 				t.Fatalf("root/height/count = %x/%d/%d, want %x/%d/%d", tree.Root, tree.Height, tree.LeafCount, wantRoot, wantHeight, count)
 			}
@@ -90,7 +100,7 @@ func TestSegmentTreeRootsAndLifecycle(t *testing.T) {
 					t.Fatalf("leaf %d = %+v, want hash %x", i, updates[i], leaf)
 				}
 			}
-			if updates[len(updates)-1].Hash != wantRoot {
+			if updates[len(updates)-1].Hash != wantTop {
 				t.Fatal("sealed updates omit the root")
 			}
 			if _, err := tree.Seal(); err == nil {
@@ -114,14 +124,15 @@ func TestShardTreeAppendAndFrontiers(t *testing.T) {
 		if err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
-		wantRoot, wantHeight := testRoot("SHARDINT", leaves[:i+1])
+		wantTop, wantHeight := testRoot("SHARDINT", leaves[:i+1])
+		wantRoot := testWrappedRoot(t, tree.TreeID, i+1, wantTop)
 		if tree.Root != wantRoot || tree.Height != wantHeight || tree.LeafCount != int64(i+1) {
 			t.Fatalf("after %d leaves, root/height/count = %x/%d/%d, want %x/%d/%d", i+1, tree.Root, tree.Height, tree.LeafCount, wantRoot, wantHeight, i+1)
 		}
 		if updates[0] != (merkle.MerkleNode{Level: 0, Index: int64(i), Hash: leaf}) {
 			t.Fatalf("append %d omitted its leaf", i)
 		}
-		if updates[len(updates)-1].Hash != wantRoot {
+		if updates[len(updates)-1].Hash != wantTop {
 			t.Fatalf("append %d omitted its root", i)
 		}
 	}
@@ -147,11 +158,12 @@ func TestRegionTreeBuildAndUpdate(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantRoot, wantHeight := testRoot("REGINT", leaves)
+			wantTop, wantHeight := testRoot("REGINT", leaves)
+			wantRoot := testWrappedRoot(t, tree.TreeID, count, wantTop)
 			if tree.Root != wantRoot || tree.Height != wantHeight || tree.LeafCount != int64(count) {
 				t.Fatalf("build root/height/count = %x/%d/%d, want %x/%d/%d", tree.Root, tree.Height, tree.LeafCount, wantRoot, wantHeight, count)
 			}
-			if updates[len(updates)-1].Hash != wantRoot {
+			if updates[len(updates)-1].Hash != wantTop {
 				t.Fatal("build updates omit root")
 			}
 			for i := range leaves {
@@ -160,8 +172,9 @@ func TestRegionTreeBuildAndUpdate(t *testing.T) {
 				if err != nil {
 					t.Fatalf("update shard %d: %v", i, err)
 				}
-				wantRoot, _ = testRoot("REGINT", leaves)
-				if tree.Root != wantRoot || updates[len(updates)-1].Hash != wantRoot {
+				wantTop, _ = testRoot("REGINT", leaves)
+				wantRoot = testWrappedRoot(t, tree.TreeID, count, wantTop)
+				if tree.Root != wantRoot || updates[len(updates)-1].Hash != wantTop {
 					t.Fatalf("update shard %d root = %x, want %x", i, tree.Root, wantRoot)
 				}
 			}
@@ -189,11 +202,12 @@ func TestGlobalTreeBuildAndUpdate(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantRoot, wantHeight := testRoot("GLOBALINT", leaves)
+			wantTop, wantHeight := testRoot("GLOBALINT", leaves)
+			wantRoot := testWrappedRoot(t, tree.TreeID, count, wantTop)
 			if tree.Root != wantRoot || tree.Height != wantHeight || tree.LeafCount != int64(count) {
 				t.Fatalf("build root/height/count = %x/%d/%d, want %x/%d/%d", tree.Root, tree.Height, tree.LeafCount, wantRoot, wantHeight, count)
 			}
-			if updates[len(updates)-1].Hash != wantRoot {
+			if updates[len(updates)-1].Hash != wantTop {
 				t.Fatal("build updates omit root")
 			}
 			for i := range leaves {
@@ -202,8 +216,9 @@ func TestGlobalTreeBuildAndUpdate(t *testing.T) {
 				if err != nil {
 					t.Fatalf("update region %d: %v", i, err)
 				}
-				wantRoot, _ = testRoot("GLOBALINT", leaves)
-				if tree.Root != wantRoot || updates[len(updates)-1].Hash != wantRoot {
+				wantTop, _ = testRoot("GLOBALINT", leaves)
+				wantRoot = testWrappedRoot(t, tree.TreeID, count, wantTop)
+				if tree.Root != wantRoot || updates[len(updates)-1].Hash != wantTop {
 					t.Fatalf("update region %d root = %x, want %x", i, tree.Root, wantRoot)
 				}
 			}
@@ -262,7 +277,8 @@ func TestHierarchyPropagatesRoots(t *testing.T) {
 	if _, err := global.Build(regionRoots); err != nil {
 		t.Fatal(err)
 	}
-	wantRoot, _ := testRoot("GLOBALINT", regionRoots)
+	wantTop, _ := testRoot("GLOBALINT", regionRoots)
+	wantRoot := testWrappedRoot(t, global.TreeID, len(regionRoots), wantTop)
 	if global.Root != wantRoot {
 		t.Fatalf("initial global root = %x, want %x", global.Root, wantRoot)
 	}
@@ -279,14 +295,16 @@ func TestHierarchyPropagatesRoots(t *testing.T) {
 	if _, err := shards[1][0].Append(segment.Root); err != nil {
 		t.Fatal(err)
 	}
-	wantShard, _ := testRoot("SHARDINT", segmentRoots[1])
+	wantTop, _ = testRoot("SHARDINT", segmentRoots[1])
+	wantShard := testWrappedRoot(t, shards[1][0].TreeID, len(segmentRoots[1]), wantTop)
 	if shards[1][0].Root != wantShard {
 		t.Fatalf("updated shard root = %x, want %x", shards[1][0].Root, wantShard)
 	}
 	if _, err := regions[1].updateShardRoot(0, shards[1][0].Root); err != nil {
 		t.Fatal(err)
 	}
-	wantRegion, _ := testRoot("REGINT", [][32]byte{wantShard, shards[1][1].Root})
+	wantTop, _ = testRoot("REGINT", [][32]byte{wantShard, shards[1][1].Root})
+	wantRegion := testWrappedRoot(t, regions[1].TreeID, 2, wantTop)
 	if regions[1].Root != wantRegion {
 		t.Fatalf("updated region root = %x, want %x", regions[1].Root, wantRegion)
 	}
@@ -294,7 +312,8 @@ func TestHierarchyPropagatesRoots(t *testing.T) {
 	if _, err := global.UpdateRegionRoot(1, regionRoots[1]); err != nil {
 		t.Fatal(err)
 	}
-	wantRoot, _ = testRoot("GLOBALINT", regionRoots)
+	wantTop, _ = testRoot("GLOBALINT", regionRoots)
+	wantRoot = testWrappedRoot(t, global.TreeID, len(regionRoots), wantTop)
 	if global.Root != wantRoot {
 		t.Fatalf("updated global root = %x, want %x", global.Root, wantRoot)
 	}

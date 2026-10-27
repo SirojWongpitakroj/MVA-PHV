@@ -198,3 +198,28 @@ func TestMergeRejectsIncompatibleFilter(t *testing.T) {
 		t.Fatal("nil receiver was accepted")
 	}
 }
+
+func TestRestoreBloomFilterForPortableProof(t *testing.T) {
+	original, err := newBloomFilter(50, 0.01)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original.Add([]byte("token"))
+	m, k, words := original.Snapshot()
+	restored, err := RestoreBloomFilter(m, k, words)
+	if err != nil || !restored.Contains([]byte("token")) {
+		t.Fatalf("restored filter: %v", err)
+	}
+	words[0] ^= 1
+	if _, _, copyWords := restored.Snapshot(); copyWords[0] == words[0] {
+		t.Fatal("restored filter aliases input words")
+	}
+	for _, bad := range []struct {
+		m, k  uint64
+		words []uint64
+	}{{0, 1, words}, {m, m + 1, words}, {m, k, nil}} {
+		if _, err := RestoreBloomFilter(bad.m, bad.k, bad.words); err == nil {
+			t.Fatalf("accepted invalid dimensions m=%d k=%d", bad.m, bad.k)
+		}
+	}
+}

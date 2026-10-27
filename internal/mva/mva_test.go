@@ -123,7 +123,7 @@ func TestMVAResolveReturnsGlobalAndRegionProof(t *testing.T) {
 	}
 	if len(values) != 1 || values[0].PhysicalAddress != address || proof == nil ||
 		proof.Epoch != mva.Epoch ||
-		len(proof.Regions) != 1 || proof.Regions["1"] == nil ||
+		len(proof.Regions) != 3 || proof.Regions["1"] == nil ||
 		proof.Regions["1"].View != ViewID || len(proof.Regions["1"].Path) == 0 {
 		t.Fatal("MVA resolve did not return the matched value and region proof")
 	}
@@ -140,7 +140,7 @@ func TestMVAResolveReturnsGlobalAndRegionProof(t *testing.T) {
 		t.Fatal("MVA proof shares level storage with the tree")
 	}
 	noValues, noMatchProof, err := mva.Resolve(query, []merkle.TreeID{{Type: merkle.TreeRegion, RegionID: "0"}})
-	if err != nil || len(noValues) != 0 || noMatchProof == nil || len(noMatchProof.Regions) != 0 {
+	if err != nil || len(noValues) != 0 || noMatchProof == nil || len(noMatchProof.Regions) != 1 || noMatchProof.Regions["0"] == nil {
 		t.Fatalf("nonmatching candidate returned values or region proofs: %v", err)
 	}
 }
