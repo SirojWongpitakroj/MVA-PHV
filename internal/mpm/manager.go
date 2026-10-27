@@ -147,51 +147,55 @@ func (m *Manager) Ingest(ctx context.Context, input Input, now time.Time) (Recei
 		return Receipt{}, fmt.Errorf("ingest MPM: duplicate LogID %s", id)
 	}
 	desc := Descriptor{RegionID: input.RegionID, SiteID: input.SiteID, DeviceID: input.DeviceID, Type: input.Type, TS: input.TS}
+	reservation, err := m.opts.HMF.Reserve(input.RegionID, input.SiteID, input.DeviceID, now)
+	if err != nil {
+		return Receipt{}, fmt.Errorf("ingest MPM: reserve HMF address: %w", err)
+	}
+	address := reservation.Address()
+	abort := func(cause error, partial bool) (Receipt, error) {
+		if abortErr := reservation.Abort(); abortErr != nil {
+			cause = errors.Join(cause, fmt.Errorf("abort HMF reservation: %w", abortErr))
+			partial = true
+		}
+		if partial {
+			m.markIncomplete(cause)
+		} else {
+			m.mu.Lock()
+			delete(m.seenIDs, id)
+			m.mu.Unlock()
+		}
+		return Receipt{}, cause
+	}
+	if address.RegionID != input.RegionID || address.ShardID != sid || address.SegmentID < 0 || address.LeafID < 0 {
+		return abort(fmt.Errorf("ingest MPM: reserved address does not match selected Shard"), false)
+	}
 	encrypted, err := m.opts.Encryptor.Encrypt(ctx, id, desc, input.Plaintext)
 	if err != nil {
-		return Receipt{}, fmt.Errorf("ingest MPM: encrypt log: %w", err)
+		return abort(fmt.Errorf("ingest MPM: encrypt log: %w", err), false)
+	}
+	locator, err := m.opts.Locator.CommitLocator(id, desc, address)
+	if err != nil {
+		return abort(fmt.Errorf("ingest MPM: locator commitment: %w", err), false)
+	}
+	leaf, err := logLeaf(id, locator, encrypted.Digest)
+	if err != nil {
+		return abort(fmt.Errorf("ingest MPM: HMF leaf commitment: %w", err), false)
 	}
 	log := domain.Log{LogID: id, RegionID: input.RegionID, SiteID: input.SiteID, DevID: input.DeviceID,
 		Type: input.Type, TS: input.TS, Ciphertext: encrypted.Ciphertext, Nonce: encrypted.Nonce,
 		Tag: encrypted.Tag, AD: encrypted.AD, Digest: encrypted.Digest}
-	var record Record
-	var mvaUpdate MVAUpdate
-	var hpbfUpdate HPBFUpdate
-	enteredBuild := false
-	address, err := m.opts.HMF.Insert(input.RegionID, input.SiteID, input.DeviceID, now, func(address Address) ([32]byte, error) {
-		enteredBuild = true
-		if address.RegionID != input.RegionID || address.ShardID != sid || address.SegmentID < 0 || address.LeafID < 0 {
-			return [32]byte{}, fmt.Errorf("reserved HMF address does not match selected shard")
-		}
-		locator, err := m.opts.Locator.CommitLocator(id, desc, address)
-		if err != nil {
-			return [32]byte{}, fmt.Errorf("locator commitment: %w", err)
-		}
-		leaf, err := logLeaf(id, locator, encrypted.Digest)
-		if err != nil {
-			return [32]byte{}, fmt.Errorf("HMF leaf commitment: %w", err)
-		}
-		record = Record{Log: log, Descriptor: desc, Address: address, AcceptedAt: now, Locator: locator, HMFLeaf: leaf}
-		mvaUpdate, err = m.opts.MVA.Ingest(record)
-		if err != nil {
-			return [32]byte{}, fmt.Errorf("MVA update: %w", err)
-		}
-		hpbfUpdate, err = m.opts.HPBF.AddToken(address.RegionID, address.ShardID, desc.SiteID, desc.DeviceID, desc.Type)
-		if err != nil {
-			return [32]byte{}, fmt.Errorf("HPBF update: %w", err)
-		}
-		return leaf, nil
-	})
+	record := Record{Log: log, Descriptor: desc, Address: address, AcceptedAt: now, Locator: locator, HMFLeaf: leaf}
+	mvaUpdate, err := m.opts.MVA.Ingest(record)
 	if err != nil {
-		if enteredBuild {
-			m.markIncomplete(err)
-		}
-		return Receipt{}, fmt.Errorf("ingest MPM: HMF insert: %w", err)
+		return abort(fmt.Errorf("ingest MPM: MVA update: %w", err), true)
 	}
-	if !enteredBuild || address != record.Address || address.ShardID != sid {
-		err = fmt.Errorf("HMF did not append the reserved address")
+	hpbfUpdate, err := m.opts.HPBF.AddToken(address.RegionID, address.ShardID, desc.SiteID, desc.DeviceID, desc.Type)
+	if err != nil {
+		return abort(fmt.Errorf("ingest MPM: HPBF update: %w", err), true)
+	}
+	if err := reservation.Commit(leaf, now); err != nil {
 		m.markIncomplete(err)
-		return Receipt{}, fmt.Errorf("ingest MPM: %w", err)
+		return Receipt{}, fmt.Errorf("ingest MPM: commit HMF address: %w", err)
 	}
 	if err = m.opts.Evidence.PersistAccepted(ctx, record, mvaUpdate, hpbfUpdate); err != nil {
 		m.markIncomplete(err)
@@ -410,6 +414,9 @@ func (m *Manager) CommitFinalization(ctx context.Context, epoch uint64) ([32]byt
 	}
 	checkpoint := c.Checkpoint
 	m.mu.Unlock()
+	if err := m.validateCandidates(c); err != nil {
+		return [32]byte{}, err
+	}
 	if err := m.opts.Checkpoints.Commit(ctx, epoch, checkpoint); err != nil {
 		// A timeout can mean that the checkpoint was stored but the reply was lost.
 		stored, getErr := m.opts.Checkpoints.GetCheckpoint(ctx, epoch)
@@ -419,12 +426,20 @@ func (m *Manager) CommitFinalization(ctx context.Context, epoch uint64) ([32]byt
 	}
 	m.gate.Lock()
 	defer m.gate.Unlock()
+	if err := m.validateCandidates(c); err != nil {
+		return [32]byte{}, err
+	}
 	if err := m.opts.HMF.CommitFinalization(epoch); err != nil {
 		return [32]byte{}, fmt.Errorf("promote MPM HMF: %w", err)
 	}
-	// Port contracts require these two promotions to be infallible after prepare.
-	m.opts.MVA.Promote(epoch)
-	m.opts.HPBF.Promote(epoch)
+	if err := m.opts.MVA.Promote(epoch); err != nil {
+		m.markIncomplete(err)
+		return [32]byte{}, fmt.Errorf("promote MPM MVA: %w", err)
+	}
+	if err := m.opts.HPBF.Promote(epoch); err != nil {
+		m.markIncomplete(err)
+		return [32]byte{}, fmt.Errorf("promote MPM HPBF: %w", err)
+	}
 	m.mu.Lock()
 	for _, segment := range c.Segments {
 		delete(m.records, segment.ID)
@@ -439,4 +454,40 @@ func (m *Manager) CommitFinalization(ctx context.Context, epoch uint64) ([32]byt
 	m.candidatePrepared = false
 	m.mu.Unlock()
 	return checkpoint, nil
+}
+
+func (m *Manager) validateCandidates(c *Candidate) error {
+	// Verify every prepared state before checkpoint publication or promotion.
+	epoch := c.Epoch
+	if err := m.opts.HMF.ValidateFinalization(epoch); err != nil {
+		return fmt.Errorf("validate MPM HMF candidate: %w", err)
+	}
+	if err := m.opts.MVA.ValidateCandidate(epoch); err != nil {
+		return fmt.Errorf("validate MPM MVA candidate: %w", err)
+	}
+	if err := m.opts.HPBF.ValidateCandidate(epoch); err != nil {
+		return fmt.Errorf("validate MPM HPBF candidate: %w", err)
+	}
+	hmfRoot, err := m.opts.HMF.Commitment()
+	if err != nil {
+		return fmt.Errorf("validate MPM HMF candidate root: %w", err)
+	}
+	if hmfRoot != c.Roots.HMF {
+		return fmt.Errorf("validate MPM HMF candidate: root changed")
+	}
+	mvaRoot, err := m.opts.MVA.Prepare(epoch, c.Records)
+	if err != nil {
+		return fmt.Errorf("validate MPM MVA candidate root: %w", err)
+	}
+	if mvaRoot != c.Roots.MVA {
+		return fmt.Errorf("validate MPM MVA candidate: root changed")
+	}
+	hpbfRoot, err := m.opts.HPBF.Prepare(epoch, c.Records)
+	if err != nil {
+		return fmt.Errorf("validate MPM HPBF candidate root: %w", err)
+	}
+	if hpbfRoot != c.Roots.HPBF {
+		return fmt.Errorf("validate MPM HPBF candidate: root changed")
+	}
+	return nil
 }

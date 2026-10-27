@@ -11,7 +11,10 @@ import (
 	"uuid"
 
 	"github.com/SirojWongpitakroj/mva-phv/internal/domain"
+	"github.com/SirojWongpitakroj/mva-phv/internal/hmf"
+	"github.com/SirojWongpitakroj/mva-phv/internal/hpbf"
 	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
+	"github.com/SirojWongpitakroj/mva-phv/internal/mva"
 )
 
 type testIDs struct {
@@ -63,6 +66,7 @@ type testHMF struct {
 	max            int64
 	age            time.Duration
 	inserted       []RecordAddress
+	reserved       map[merkle.TreeID]bool
 }
 type RecordAddress struct {
 	Address Address
@@ -70,7 +74,7 @@ type RecordAddress struct {
 }
 
 func newTestHMF(max int64, age time.Duration) *testHMF {
-	return &testHMF{shards: map[merkle.TreeID]*testShard{}, persisted: map[merkle.TreeID]bool{}, max: max, age: age}
+	return &testHMF{shards: map[merkle.TreeID]*testShard{}, persisted: map[merkle.TreeID]bool{}, reserved: map[merkle.TreeID]bool{}, max: max, age: age}
 }
 func (h *testHMF) SelectShard(rid, site, dev string) (int64, error) {
 	if rid != "r0" && rid != "r1" {
@@ -89,14 +93,57 @@ func (h *testHMF) seal(sh *testShard, now time.Time) {
 	sh.active = nil
 	sh.leafs = nil
 }
-func (h *testHMF) Insert(rid, site, dev string, now time.Time, build func(Address) ([32]byte, error)) (Address, error) {
+
+type testReservation struct {
+	h       *testHMF
+	address Address
+	key     merkle.TreeID
+}
+
+func (r *testReservation) Address() Address { return r.address }
+func (r *testReservation) Commit(leaf [32]byte, now time.Time) error {
+	r.h.mu.Lock()
+	defer r.h.mu.Unlock()
+	if !r.h.reserved[r.key] {
+		return errors.New("reservation completed")
+	}
+	sh := r.h.shards[r.key]
+	if sh.active == nil || sh.active.ID.SegmentID != r.address.SegmentID || int64(len(sh.leafs)) != r.address.LeafID {
+		return errors.New("position changed")
+	}
+	sh.leafs = append(sh.leafs, leaf)
+	r.h.inserted = append(r.h.inserted, RecordAddress{r.address, leaf})
+	delete(r.h.reserved, r.key)
+	if int64(len(sh.leafs)) >= r.h.max || now.Sub(sh.opened) >= r.h.age {
+		r.h.seal(sh, now)
+	}
+	return nil
+}
+func (r *testReservation) Abort() error {
+	r.h.mu.Lock()
+	defer r.h.mu.Unlock()
+	if !r.h.reserved[r.key] {
+		return errors.New("reservation completed")
+	}
+	delete(r.h.reserved, r.key)
+	sh := r.h.shards[r.key]
+	if sh.active != nil && len(sh.leafs) == 0 {
+		sh.active = nil
+		sh.next--
+	}
+	return nil
+}
+func (h *testHMF) Reserve(rid, site, dev string, now time.Time) (Reservation, error) {
 	sid, err := h.SelectShard(rid, site, dev)
 	if err != nil {
-		return Address{}, err
+		return nil, err
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	key := merkle.TreeID{Type: merkle.TreeShard, RegionID: rid, ShardID: sid}
+	if h.reserved[key] {
+		return nil, errors.New("Shard busy")
+	}
 	sh := h.shards[key]
 	if sh == nil {
 		sh = &testShard{}
@@ -106,26 +153,21 @@ func (h *testHMF) Insert(rid, site, dev string, now time.Time, build func(Addres
 		h.seal(sh, now)
 	}
 	if sh.active == nil {
-		sh.active = &Segment{ID: merkle.TreeID{Type: merkle.TreeSegment, RegionID: rid, ShardID: sid, SegmentID: sh.next}}
+		sh.active = &Segment{ID: merkle.TreeID{Type: merkle.TreeSegment, RegionID: rid, ShardID: sid, SegmentID: sh.next}, OpenedAt: now, MaxLeaves: int(h.max)}
 		sh.next++
 		sh.opened = now
 	}
 	a := Address{RegionID: rid, ShardID: sid, SegmentID: sh.active.ID.SegmentID, LeafID: int64(len(sh.leafs))}
-	leaf, err := build(a)
-	if err != nil {
-		return Address{}, err
-	}
-	sh.leafs = append(sh.leafs, leaf)
-	h.inserted = append(h.inserted, RecordAddress{a, leaf})
-	if int64(len(sh.leafs)) >= h.max {
-		h.seal(sh, now)
-	}
-	return a, nil
+	h.reserved[key] = true
+	return &testReservation{h: h, address: a, key: key}, nil
 }
 func (h *testHMF) SealExpired(now time.Time) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for _, sh := range h.shards {
+	for key, sh := range h.shards {
+		if h.reserved[key] {
+			continue
+		}
 		if sh.active != nil && now.Sub(sh.opened) >= h.age {
 			h.seal(sh, now)
 		}
@@ -160,6 +202,19 @@ func (h *testHMF) Commitment() ([32]byte, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return sha256.Sum256(fmt.Append(nil, h.candidateEpoch, h.candidate)), nil
+}
+func (h *testHMF) ValidateFinalization(epoch uint64) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.candidateEpoch != epoch {
+		return errors.New("epoch mismatch")
+	}
+	for _, s := range h.candidate {
+		if !h.persisted[s.ID] {
+			return errors.New("not persisted")
+		}
+	}
+	return nil
 }
 func (h *testHMF) CommitFinalization(epoch uint64) error {
 	h.mu.Lock()
@@ -198,7 +253,13 @@ func (v *testMVA) Prepare(_ uint64, records []Record) ([32]byte, error) {
 	v.prepared = append([]Record(nil), records...)
 	return sha256.Sum256(fmt.Append(nil, records)), nil
 }
-func (v *testMVA) Promote(epoch uint64) { v.mu.Lock(); v.finalized = epoch; v.mu.Unlock() }
+func (v *testMVA) Promote(epoch uint64) error {
+	v.mu.Lock()
+	v.finalized = epoch
+	v.mu.Unlock()
+	return nil
+}
+func (v *testMVA) ValidateCandidate(uint64) error { return nil }
 
 type tokenCall struct {
 	region            string
@@ -224,7 +285,13 @@ func (v *testHPBF) Prepare(_ uint64, records []Record) ([32]byte, error) {
 	v.prepared = append([]Record(nil), records...)
 	return sha256.Sum256(fmt.Append(nil, records)), nil
 }
-func (v *testHPBF) Promote(epoch uint64) { v.mu.Lock(); v.finalized = epoch; v.mu.Unlock() }
+func (v *testHPBF) Promote(epoch uint64) error {
+	v.mu.Lock()
+	v.finalized = epoch
+	v.mu.Unlock()
+	return nil
+}
+func (v *testHPBF) ValidateCandidate(uint64) error { return nil }
 
 type testEvidence struct {
 	mu            sync.Mutex
@@ -233,11 +300,15 @@ type testEvidence struct {
 	candidates    []Candidate
 	failSeal      bool
 	failCandidate bool
+	failAccepted  bool
 }
 
 func (e *testEvidence) PersistAccepted(_ context.Context, r Record, _ MVAUpdate, _ HPBFUpdate) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.failAccepted {
+		return errors.New("accepted log unavailable")
+	}
 	e.accepted = append(e.accepted, r)
 	return nil
 }
@@ -616,5 +687,265 @@ func TestIngestionContinuesDuringCheckpointCommit(t *testing.T) {
 	}
 	if len(r.manager.PendingSegments()) != 1 {
 		t.Fatal("new segment was cleared with old candidate")
+	}
+}
+
+func TestConcreteAdaptersCoordinateSealedCandidates(t *testing.T) {
+	h, err := hmf.NewHMF(1, 2, 1, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := mva.NewMVA(1, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := hpbf.NewHPBF(1, 2, 100, 0.00001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := &testEvidence{}
+	checkpoints := &testCheckpoints{roots: map[uint64][32]byte{}}
+	manager, err := New(Options{HMF: &HMFAdapter{Tree: h}, MVA: &MVAAdapter{Tree: v},
+		HPBF: &HPBFAdapter{Tree: b}, Encryptor: testEncrypt{}, Locator: CanonicalLocator{},
+		Evidence: evidence, Checkpoints: checkpoints, IDs: &testIDs{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	now := time.Unix(200, 0)
+	firstInput := input("device")
+	firstInput.RegionID = "0"
+	initialRoot, _ := h.FinalizedRoot()
+	first, err := manager.Ingest(ctx, firstInput, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Address.RegionID != "0" || first.Address.LeafID != 0 || len(evidence.accepted) != 1 || len(evidence.sealed) != 1 {
+		t.Fatal("concrete adapters did not persist one bound and sealed record")
+	}
+	sealed := evidence.sealed[0]
+	if sealed.ID.SegmentID != first.Address.SegmentID || sealed.Root == ([32]byte{}) ||
+		sealed.OpenedAt != now || sealed.SealedAt != now || sealed.MaxLeaves != 1 {
+		t.Fatalf("HMF adapter returned incomplete Segment metadata: %+v", sealed)
+	}
+	if evidence.accepted[0].Address != first.Address || evidence.accepted[0].Locator != first.Locator ||
+		evidence.accepted[0].HMFLeaf != first.HMFLeaf || v.Regions[0].IDView.LeafCount != 1 {
+		t.Fatal("MVA, HMF, and persistence received different records")
+	}
+	candidate, err := manager.PrepareFinalization(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidate.Records) != 1 || candidate.Records[0].Address != first.Address ||
+		v.Candidate == nil || b.Candidate == nil || h.Candidate == nil ||
+		candidate.Roots.MVA != v.Candidate.Root || candidate.Roots.HPBF != b.Candidate.Global.RootHash {
+		t.Fatal("concrete components did not prepare the same sealed record")
+	}
+	if root, _ := h.FinalizedRoot(); root != initialRoot || v.Finalized != nil || b.Finalized.Epoch != 0 {
+		t.Fatal("preparation published a candidate")
+	}
+	secondInput := firstInput
+	secondInput.TS = now.Add(time.Second)
+	second, err := manager.Ingest(ctx, secondInput, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Address.SegmentID != first.Address.SegmentID+1 {
+		t.Fatal("next log did not use a new Segment")
+	}
+	if retry, err := manager.PrepareFinalization(ctx, 1); err != nil || retry.Checkpoint != candidate.Checkpoint || len(retry.Records) != 1 {
+		t.Fatalf("later log entered prepared candidate: %v", err)
+	}
+	checkpoints.fail = true
+	if _, err := manager.CommitFinalization(ctx, 1); err == nil {
+		t.Fatal("failed checkpoint promoted")
+	}
+	if epoch, _ := manager.Finalized(); epoch != 0 || v.Finalized != nil || b.Finalized.Epoch != 0 {
+		t.Fatal("checkpoint failure advanced a component")
+	}
+	checkpoints.fail = false
+	if _, err := manager.CommitFinalization(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if epoch, roots := manager.Finalized(); epoch != 1 || roots != candidate.Roots ||
+		v.Finalized.Epoch != 1 || b.Finalized.Epoch != 1 || v.Finalized.Regions["0"].IDView.LeafCount != 1 {
+		t.Fatal("promotion did not publish the same epoch across components")
+	}
+	if pending := manager.PendingSegments(); len(pending) != 1 || pending[0].ID.SegmentID != second.Address.SegmentID {
+		t.Fatal("promotion cleared a Segment sealed after preparation")
+	}
+	next, err := manager.PrepareFinalization(ctx, 2)
+	if err != nil || len(next.Records) != 1 || next.Records[0].Address != second.Address ||
+		v.Candidate.Regions["0"].IDView.LeafCount != 2 {
+		t.Fatalf("next candidate is not cumulative: %v", err)
+	}
+}
+
+type unavailableEncryptor struct{}
+
+func (unavailableEncryptor) Encrypt(context.Context, uuid.UUID, Descriptor, []byte) (Encrypted, error) {
+	return Encrypted{}, errors.New("encryption unavailable")
+}
+
+type unavailableLocator struct{}
+
+func (unavailableLocator) CommitLocator(uuid.UUID, Descriptor, Address) ([32]byte, error) {
+	return [32]byte{}, errors.New("locator unavailable")
+}
+
+func TestMPMEarlyFailureAbortsAddressReservation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*rig)
+	}{
+		{name: "encryption", setup: func(r *rig) { r.manager.opts.Encryptor = unavailableEncryptor{} }},
+		{name: "locator", setup: func(r *rig) { r.manager.opts.Locator = unavailableLocator{} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t, 2)
+			tc.setup(r)
+			if _, err := r.manager.Ingest(context.Background(), input("device"), time.Unix(200, 0)); err == nil {
+				t.Fatal("expected failure")
+			}
+			if len(r.h.reserved) != 0 || len(r.h.inserted) != 0 || len(r.v.received) != 0 || len(r.b.received) != 0 || len(r.e.accepted) != 0 {
+				t.Fatal("early failure left a reservation or authenticated update")
+			}
+			if err := r.manager.workingError(); err != nil {
+				t.Fatalf("recoverable failure poisoned manager: %v", err)
+			}
+			r.manager.opts.Encryptor = testEncrypt{}
+			r.manager.opts.Locator = testLocator{}
+			receipt, err := r.manager.Ingest(context.Background(), input("device"), time.Unix(200, 0))
+			if err != nil || receipt.Address.SegmentID != 0 || receipt.Address.LeafID != 0 {
+				t.Fatalf("position not reusable: %+v, %v", receipt.Address, err)
+			}
+		})
+	}
+}
+
+type unavailableMVA struct{ *testMVA }
+
+func (*unavailableMVA) Ingest(Record) (MVAUpdate, error) {
+	return MVAUpdate{}, errors.New("MVA unavailable")
+}
+
+type unavailableCommitReservation struct{ Reservation }
+
+func (unavailableCommitReservation) Commit([32]byte, time.Time) error {
+	return errors.New("HMF append unavailable")
+}
+
+type unavailableCommitHMF struct{ *testHMF }
+
+func (h *unavailableCommitHMF) Reserve(rid, site, device string, now time.Time) (Reservation, error) {
+	r, err := h.testHMF.Reserve(rid, site, device, now)
+	if err != nil {
+		return nil, err
+	}
+	return unavailableCommitReservation{Reservation: r}, nil
+}
+
+func TestMPMPartialFailuresBlockFinalization(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*rig)
+	}{
+		{name: "MVA update", setup: func(r *rig) { r.manager.opts.MVA = &unavailableMVA{testMVA: r.v} }},
+		{name: "HMF commit", setup: func(r *rig) { r.manager.opts.HMF = &unavailableCommitHMF{testHMF: r.h} }},
+		{name: "accepted evidence", setup: func(r *rig) { r.e.failAccepted = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t, 1)
+			tc.setup(r)
+			if _, err := r.manager.Ingest(context.Background(), input("device"), time.Unix(200, 0)); err == nil {
+				t.Fatal("expected partial failure")
+			}
+			if _, err := r.manager.PrepareFinalization(context.Background(), 1); !errors.Is(err, ErrIncompleteWorkingState) {
+				t.Fatalf("partial state became a candidate: %v", err)
+			}
+			if len(r.c.roots) != 0 {
+				t.Fatal("partial state reached checkpoint store")
+			}
+		})
+	}
+}
+
+type driftingMVA struct {
+	*testMVA
+	drift bool
+}
+
+func (v *driftingMVA) Prepare(epoch uint64, records []Record) ([32]byte, error) {
+	if v.drift {
+		return [32]byte{99}, nil
+	}
+	return v.testMVA.Prepare(epoch, records)
+}
+
+func TestMPMRejectsChangedRootBeforeCheckpoint(t *testing.T) {
+	r := newRig(t, 1)
+	v := &driftingMVA{testMVA: r.v}
+	r.manager.opts.MVA = v
+	ctx := context.Background()
+	if _, err := r.manager.Ingest(ctx, input("device"), time.Unix(200, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.manager.PrepareFinalization(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	v.drift = true
+	if _, err := r.manager.CommitFinalization(ctx, 1); err == nil {
+		t.Fatal("changed candidate root was anchored")
+	}
+	if len(r.c.roots) != 0 || r.h.finalized != 0 || r.v.finalized != 0 || r.b.finalized != 0 {
+		t.Fatal("changed root advanced checkpoint or component")
+	}
+}
+
+func TestMPMRejectsInvalidInputBeforeAllocation(t *testing.T) {
+	if _, err := New(Options{}); err == nil {
+		t.Fatal("missing dependencies accepted")
+	}
+	r := newRig(t, 2)
+	bad := input("device")
+	bad.SiteID = ""
+	if _, err := r.manager.Ingest(context.Background(), bad, time.Unix(200, 0)); err == nil {
+		t.Fatal("missing Site accepted")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := r.manager.Ingest(ctx, input("device"), time.Unix(200, 0)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled context: %v", err)
+	}
+	if len(r.h.shards) != 0 || len(r.v.received) != 0 || len(r.b.received) != 0 {
+		t.Fatal("invalid input allocated an address")
+	}
+}
+
+func TestMPMEmptyPendingEpochDoesNotIncludeActiveLog(t *testing.T) {
+	r := newRig(t, 3)
+	ctx := context.Background()
+	receipt, err := r.manager.Ingest(ctx, input("device"), time.Unix(200, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.manager.PendingSegments()) != 0 {
+		t.Fatal("active Segment entered pending")
+	}
+	candidate, err := r.manager.PrepareFinalization(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidate.Records) != 0 || len(candidate.Segments) != 0 || len(r.v.prepared) != 0 || len(r.b.prepared) != 0 {
+		t.Fatal("active record entered empty pending candidate")
+	}
+	if _, err := r.manager.CommitFinalization(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if epoch, _ := r.manager.Finalized(); epoch != 1 {
+		t.Fatal("empty epoch did not finalize")
+	}
+	if len(r.h.inserted) != 1 || r.h.inserted[0].Address != receipt.Address || len(r.manager.PendingSegments()) != 0 {
+		t.Fatal("empty epoch discarded or sealed the active Segment")
 	}
 }

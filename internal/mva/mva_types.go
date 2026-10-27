@@ -2,6 +2,8 @@ package mva
 
 import (
 	"sync"
+	"time"
+	"uuid"
 
 	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
 )
@@ -11,10 +13,20 @@ type MVA struct {
 	Epoch     uint64
 	Regions   []*RegionMVA
 	Finalized *MVASnapshot
+	Candidate *MVASnapshot
 	mu        sync.RWMutex
 
 	// Global Merkle tree over RegionMVA.Root values
 	Levels [][][32]byte
+}
+
+// PendingRecord is one sealed log supplied by MPM for a candidate epoch.
+type PendingRecord struct {
+	LogID                            uuid.UUID
+	RegionID, SiteID, DeviceID, Type string
+	TS                               time.Time
+	Address                          PhysicalAddress
+	Locator                          [32]byte
 }
 
 type RegionMVA struct {

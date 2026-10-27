@@ -47,6 +47,7 @@ func NewHMFWithConfig(config HMFConfig, sealInterval time.Duration) (*HMF, error
 	h := &HMF{
 		MaxSegmentSize: config.MaxSegmentLeaves, SealInterval: sealInterval, regionIDs: ids,
 		activeShards: make(map[merkle.TreeID]struct{}),
+		reservations: make(map[merkle.TreeID]*Reservation),
 		Working:      &HMFWorkingState{Global: NewGlobalTree(len(ids)), Regions: make(map[string]*HMFWorkingRegion, len(ids))},
 		Finalized:    &HMFState{Global: NewGlobalTree(len(ids)), Regions: make(map[string]*HMFRegionState, len(ids))},
 	}
@@ -135,6 +136,9 @@ func (h *HMF) insertIntoShard(rid string, sid int64, commitment [32]byte, now ti
 	if shard == nil {
 		return 0, 0, fmt.Errorf("insert HMF: unknown shard %d in region %q", sid, rid)
 	}
+	if h.reservations[shardTreeID(rid, sid)] != nil {
+		return 0, 0, fmt.Errorf("insert HMF: Shard %q/%d has an outstanding address reservation", rid, sid)
+	}
 	if shard.Active != nil && now.Sub(shard.OpenedAt) >= h.SealInterval {
 		if _, err := h.sealSegment(rid, sid, shard.Active.TreeID.SegmentID, now); err != nil {
 			return 0, 0, err
@@ -142,6 +146,7 @@ func (h *HMF) insertIntoShard(rid string, sid int64, commitment [32]byte, now ti
 	}
 	if shard.Active == nil {
 		segment := NewSegmentTree(rid, sid, shard.nextSegID, h.MaxSegmentSize)
+		segment.OpenedAt = now
 		shard.nextSegID++
 		shard.Active = segment
 		h.activeShards[shardTreeID(rid, sid)] = struct{}{}
@@ -208,6 +213,9 @@ func (h *HMF) SealExpired(now time.Time) ([]*SegmentTree, error) {
 	}
 	slices.SortFunc(keys, compareHMFShardIDs)
 	for _, key := range keys {
+		if h.reservations[key] != nil {
+			continue
+		}
 		shard := h.Working.Regions[key.RegionID].Shards[key.ShardID]
 		if shard.Active == nil || shard.Active.LeafCount == 0 || now.Sub(shard.OpenedAt) < h.SealInterval {
 			continue
@@ -383,12 +391,13 @@ func hmfSetLevelNode(levels [][]merkle.MerkleNode, overrides *[]*hmfSparseNode, 
 }
 
 // hmfUpdateRegionPath changes one shard leaf and only its authentication path.
-func hmfUpdateRegionPath(region *HMFRegionState, shardIndex int, hash [32]byte) error {
+func hmfUpdateRegionPath(region *HMFRegionState, shardIndex int, hash [32]byte) ([]merkle.MerkleNode, error) {
 	levels := region.Tree.levels
 	if shardIndex < 0 || shardIndex >= len(levels[0]) {
-		return fmt.Errorf("update finalized region: shard index %d out of range", shardIndex)
+		return nil, fmt.Errorf("update finalized region: shard index %d out of range", shardIndex)
 	}
-	hmfSetLevelNode(levels, &region.nodes, merkle.MerkleNode{Level: 0, Index: int64(shardIndex), Hash: hash})
+	updates := []merkle.MerkleNode{{Level: 0, Index: int64(shardIndex), Hash: hash}}
+	hmfSetLevelNode(levels, &region.nodes, updates[0])
 	index := shardIndex
 	for level := 1; level < len(levels); level++ {
 		parentIndex := index / 2
@@ -398,23 +407,25 @@ func hmfUpdateRegionPath(region *HMFRegionState, shardIndex int, hash [32]byte) 
 		if rightIndex := leftIndex + 1; rightIndex < len(levels[level-1]) {
 			right := hmfLevelNode(levels, region.nodes, level-1, rightIndex)
 			if err := parent.ComputeInternalHash("REGINT", left.Hash, right.Hash); err != nil {
-				return err
+				return nil, err
 			}
 		}
 		hmfSetLevelNode(levels, &region.nodes, parent)
+		updates = append(updates, parent)
 		index = parentIndex
 	}
 	root := hmfLevelNode(levels, region.nodes, len(levels)-1, 0)
-	return region.Tree.setRoot(root.Hash)
+	return updates, region.Tree.setRoot(root.Hash)
 }
 
 // hmfUpdateGlobalPath changes one region leaf and only its authentication path.
-func hmfUpdateGlobalPath(state *HMFState, regionIndex int, hash [32]byte) error {
+func hmfUpdateGlobalPath(state *HMFState, regionIndex int, hash [32]byte) ([]merkle.MerkleNode, error) {
 	levels := state.Global.levels
 	if regionIndex < 0 || regionIndex >= len(levels[0]) {
-		return fmt.Errorf("update finalized global: region index %d out of range", regionIndex)
+		return nil, fmt.Errorf("update finalized global: region index %d out of range", regionIndex)
 	}
-	hmfSetLevelNode(levels, &state.nodes, merkle.MerkleNode{Level: 0, Index: int64(regionIndex), Hash: hash})
+	updates := []merkle.MerkleNode{{Level: 0, Index: int64(regionIndex), Hash: hash}}
+	hmfSetLevelNode(levels, &state.nodes, updates[0])
 	index := regionIndex
 	for level := 1; level < len(levels); level++ {
 		parentIndex := index / 2
@@ -424,14 +435,15 @@ func hmfUpdateGlobalPath(state *HMFState, regionIndex int, hash [32]byte) error 
 		if rightIndex := leftIndex + 1; rightIndex < len(levels[level-1]) {
 			right := hmfLevelNode(levels, state.nodes, level-1, rightIndex)
 			if err := parent.ComputeInternalHash("GLOBALINT", left.Hash, right.Hash); err != nil {
-				return err
+				return nil, err
 			}
 		}
 		hmfSetLevelNode(levels, &state.nodes, parent)
+		updates = append(updates, parent)
 		index = parentIndex
 	}
 	root := hmfLevelNode(levels, state.nodes, len(levels)-1, 0)
-	return state.Global.setRoot(root.Hash)
+	return updates, state.Global.setRoot(root.Hash)
 }
 
 // PrepareFinalization incorporates only currently pending sealed segments.
@@ -467,6 +479,7 @@ func (h *HMF) PrepareFinalization(epoch uint64) error {
 	slices.SortFunc(keys, compareHMFShardIDs)
 
 	candidate := cloneFinalizedState(h.Finalized, epoch)
+	var changes []HMFChangedNode
 	dirtyRegions := make(map[string]struct{})
 	for _, key := range keys {
 		region := candidate.Regions[key.RegionID]
@@ -495,13 +508,21 @@ func (h *HMF) PrepareFinalization(epoch uint64) error {
 				segment.TreeID.SegmentID != shard.Tree.LeafCount {
 				return fmt.Errorf("prepare HMF finalization: invalid pending segment %q/%d/%d", segment.TreeID.RegionID, segment.TreeID.ShardID, segment.TreeID.SegmentID)
 			}
-			if _, err := shard.Tree.Append(segment.Root); err != nil {
+			updates, err := shard.Tree.Append(segment.Root)
+			if err != nil {
 				return fmt.Errorf("prepare HMF finalization: append segment %d: %w", segment.TreeID.SegmentID, err)
+			}
+			for _, node := range updates {
+				changes = append(changes, HMFChangedNode{TreeID: key, Node: node})
 			}
 		}
 		region.Shards[key.ShardID] = shard
-		if err := hmfUpdateRegionPath(region, int(key.ShardID), shard.Tree.Root); err != nil {
+		updates, err := hmfUpdateRegionPath(region, int(key.ShardID), shard.Tree.Root)
+		if err != nil {
 			return fmt.Errorf("prepare HMF finalization: update region %q: %w", key.RegionID, err)
+		}
+		for _, node := range updates {
+			changes = append(changes, HMFChangedNode{TreeID: region.Tree.TreeID, Node: node})
 		}
 	}
 	// Update Global only after all changed Region roots are available.
@@ -515,11 +536,16 @@ func (h *HMF) PrepareFinalization(epoch uint64) error {
 		if !found {
 			return fmt.Errorf("prepare HMF finalization: unknown region %q", rid)
 		}
-		if err := hmfUpdateGlobalPath(candidate, index, candidate.Regions[rid].Tree.Root); err != nil {
+		updates, err := hmfUpdateGlobalPath(candidate, index, candidate.Regions[rid].Tree.Root)
+		if err != nil {
 			return fmt.Errorf("prepare HMF finalization: update global region %q: %w", rid, err)
+		}
+		for _, node := range updates {
+			changes = append(changes, HMFChangedNode{TreeID: candidate.Global.TreeID, Node: node})
 		}
 	}
 	h.Candidate = candidate
+	h.candidateChanges = changes
 	h.candidatePending = len(h.pendingSealed)
 	return nil
 }
@@ -551,6 +577,26 @@ func (h *HMF) FinalizedRoot() ([32]byte, error) {
 }
 
 // CommitFinalization promotes a prepared candidate after external success.
+func (h *HMF) ValidateFinalization(epoch uint64) error {
+	if h == nil {
+		return fmt.Errorf("validate HMF finalization: HMF is nil")
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.Candidate == nil {
+		return ErrNoCandidateState
+	}
+	if h.Candidate.Epoch != epoch {
+		return fmt.Errorf("validate HMF finalization: candidate epoch %d, got %d", h.Candidate.Epoch, epoch)
+	}
+	for _, segment := range h.pendingSealed[:h.candidatePending] {
+		if !segment.persisted {
+			return fmt.Errorf("validate HMF finalization: Segment %v is not persisted", segment.TreeID)
+		}
+	}
+	return nil
+}
+
 func (h *HMF) CommitFinalization(epoch uint64) error {
 	if h == nil {
 		return fmt.Errorf("commit HMF finalization: HMF is nil")
@@ -570,6 +616,7 @@ func (h *HMF) CommitFinalization(epoch uint64) error {
 	}
 	h.Finalized = h.Candidate
 	h.Candidate = nil
+	h.candidateChanges = nil
 	h.pendingSealed = slices.Clone(h.pendingSealed[h.candidatePending:])
 	h.candidatePending = 0
 	return nil

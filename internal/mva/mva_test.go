@@ -543,3 +543,178 @@ func TestMVALockIsPerInstance(t *testing.T) {
 	first.mu.Unlock()
 	locked = false
 }
+
+func pendingMVALog(id byte, regionID string) PendingRecord {
+	key, address, locator := testMVALog(id, regionID)
+	return PendingRecord{LogID: key.ID, RegionID: regionID, SiteID: key.SiteID,
+		DeviceID: key.DevID, Type: key.Type, TS: key.TS,
+		Address: address, Locator: locator}
+}
+
+func TestMVACandidateLifecycleAndFinalizedResolve(t *testing.T) {
+	tree, err := NewMVA(2, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed := pendingMVALog(1, "0")
+	working := []PendingRecord{pendingMVALog(2, "0"), pendingMVALog(3, "1")}
+	for _, record := range append([]PendingRecord{sealed}, working...) {
+		if _, _, err := tree.IngestRecord(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if epoch, order, err := tree.WorkingMetadata(); err != nil || epoch != 1 || order != 3 {
+		t.Fatalf("initial working metadata = %d/%d, %v", epoch, order, err)
+	}
+	root, err := tree.PrepareCandidate(1, []PendingRecord{sealed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tree.Finalized != nil {
+		t.Fatal("candidate became authoritative before promotion")
+	}
+	if epoch, _, err := tree.WorkingMetadata(); err != nil || epoch != 2 {
+		t.Fatalf("working generation after preparation = %d, %v", epoch, err)
+	}
+	snapshot, err := tree.CandidateSnapshot(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Root != root || snapshot.Regions["0"].IDView.LeafCount != 1 ||
+		snapshot.Regions["1"].IDView.LeafCount != 0 || tree.Regions[0].IDView.LeafCount != 2 {
+		t.Fatal("candidate contains active records or changed working state")
+	}
+	regions := []merkle.TreeID{{Type: merkle.TreeRegion, RegionID: "0"}, {Type: merkle.TreeRegion, RegionID: "1"}}
+	if _, _, err := tree.Resolve(idKey{ID: sealed.LogID}, regions); err == nil {
+		t.Fatal("candidate was queryable before promotion")
+	}
+	if retry, err := tree.PrepareCandidate(1, working); err != nil || retry != root {
+		t.Fatalf("same-epoch retry changed candidate: %x, %v", retry, err)
+	}
+	if err := tree.CommitCandidate(1); err != nil {
+		t.Fatal(err)
+	}
+	first := tree.Finalized
+	if first.Root != root || first.Epoch != 1 || tree.Regions[0].Finalized != first.Regions["0"] {
+		t.Fatal("promoted Region and Global snapshots disagree")
+	}
+	values, proof, err := tree.Resolve(idKey{ID: sealed.LogID}, regions)
+	if err != nil || len(values) != 1 || values[0].PhysicalAddress != sealed.Address ||
+		values[0].LeafHash != sealed.Locator || proof.Epoch != 1 {
+		t.Fatalf("sealed record did not resolve from epoch 1: values=%d, err=%v", len(values), err)
+	}
+	for _, record := range working {
+		values, _, err := tree.Resolve(idKey{ID: record.LogID}, regions)
+		if err != nil || len(values) != 0 {
+			t.Fatalf("active record resolved in epoch 1: %v", err)
+		}
+	}
+	secondRoot, err := tree.PrepareCandidate(2, working)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondRoot == root || tree.Finalized != first || first.Regions["0"].IDView.LeafCount != 1 {
+		t.Fatal("preparing epoch 2 changed epoch 1")
+	}
+	if err := tree.CommitCandidate(2); err != nil {
+		t.Fatal(err)
+	}
+	if tree.Finalized.Regions["0"].IDView.LeafCount != 2 || tree.Finalized.Regions["1"].IDView.LeafCount != 1 {
+		t.Fatal("epoch 2 did not include earlier sealed and newly sealed records")
+	}
+	for _, record := range working {
+		values, proof, err := tree.Resolve(idKey{ID: record.LogID}, regions)
+		if err != nil || len(values) != 1 || proof.Epoch != 2 {
+			t.Fatalf("epoch 2 resolve: %v", err)
+		}
+	}
+}
+
+func TestMVACandidateRejectsInvalidTransitions(t *testing.T) {
+	var absent *MVA
+	if _, err := absent.PrepareCandidate(1, nil); err == nil {
+		t.Fatal("nil MVA prepared")
+	}
+	tree, err := NewMVA(1, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tree.CandidateSnapshot(1); err == nil {
+		t.Fatal("snapshot existed before prepare")
+	}
+	if err := tree.ValidateCandidate(1); err == nil {
+		t.Fatal("unprepared candidate validated")
+	}
+	if err := tree.CommitCandidate(1); err == nil {
+		t.Fatal("unprepared candidate promoted")
+	}
+	if _, err := tree.PrepareCandidate(0, nil); err == nil {
+		t.Fatal("nonadvancing epoch accepted")
+	}
+	wrong := pendingMVALog(1, "0")
+	wrong.Address.RegionID = "other"
+	if _, _, err := tree.IngestRecord(wrong); err == nil {
+		t.Fatal("mismatched physical Region ingested")
+	}
+	if _, err := tree.PrepareCandidate(1, []PendingRecord{wrong}); err == nil || tree.Candidate != nil {
+		t.Fatal("invalid sealed record published a candidate")
+	}
+	valid := pendingMVALog(1, "0")
+	if _, err := tree.PrepareCandidate(1, []PendingRecord{valid}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tree.PrepareCandidate(2, nil); err == nil {
+		t.Fatal("conflicting epoch prepared")
+	}
+	if _, err := tree.CandidateSnapshot(2); err == nil {
+		t.Fatal("wrong epoch snapshot returned")
+	}
+	if err := tree.ValidateCandidate(2); err == nil {
+		t.Fatal("wrong epoch validated")
+	}
+	if err := tree.CommitCandidate(2); err == nil || tree.Finalized != nil {
+		t.Fatal("wrong epoch promoted")
+	}
+	if err := tree.CommitCandidate(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := tree.CommitCandidate(1); err == nil {
+		t.Fatal("candidate promoted twice")
+	}
+}
+
+func TestMVACandidateEmptyEpochKeepsPriorFinalizedView(t *testing.T) {
+	tree, err := NewMVA(1, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed := pendingMVALog(1, "0")
+	active := pendingMVALog(2, "0")
+	if _, _, err := tree.IngestRecord(sealed); err != nil {
+		t.Fatal(err)
+	}
+	root, err := tree.PrepareCandidate(1, []PendingRecord{sealed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tree.CommitCandidate(1); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := tree.IngestRecord(active); err != nil {
+		t.Fatal(err)
+	}
+	emptyRoot, err := tree.PrepareCandidate(2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emptyRoot != root || tree.Candidate.Regions["0"].IDView.LeafCount != 1 || tree.Regions[0].IDView.LeafCount != 2 {
+		t.Fatal("active record entered empty pending epoch")
+	}
+	if err := tree.CommitCandidate(2); err != nil {
+		t.Fatal(err)
+	}
+	values, proof, err := tree.Resolve(idKey{ID: active.LogID}, []merkle.TreeID{{Type: merkle.TreeRegion, RegionID: "0"}})
+	if err != nil || len(values) != 0 || proof.Epoch != 2 {
+		t.Fatalf("active record visible after empty epoch: %v", err)
+	}
+}

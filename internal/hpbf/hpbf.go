@@ -12,13 +12,17 @@ import (
 
 // HPBF keeps the last committed epoch separate from incoming tokens.
 type HPBF struct {
-	Finalized  *HPBFSnapshot
-	Working    *HPBFSnapshot
-	mu         sync.RWMutex
-	numRegions int
-	numShards  int
-	n          int
-	p          float64
+	Finalized        *HPBFSnapshot
+	Working          *HPBFSnapshot
+	Candidate        *HPBFSnapshot
+	candidateShards  []ShardHPBFPartition
+	candidateRegions []RegionHPBFPartition
+	candidateGlobal  GlobalHPBFPartition
+	mu               sync.RWMutex
+	numRegions       int
+	numShards        int
+	n                int
+	p                float64
 }
 
 type HPBFSnapshot struct {

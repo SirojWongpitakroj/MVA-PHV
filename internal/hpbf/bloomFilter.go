@@ -41,6 +41,14 @@ func (bf *BloomFilter) Clone() *BloomFilter {
 	}
 }
 
+// Snapshot returns a detached filter encoding for evidence storage.
+func (bf *BloomFilter) Snapshot() (m, k uint64, words []uint64) {
+	if bf == nil {
+		return 0, 0, nil
+	}
+	return bf.m, bf.k, append([]uint64(nil), bf.bits...)
+}
+
 func (bf *BloomFilter) positions(token []byte) []uint64 {
 	h := xxh3.Hash128(token)
 

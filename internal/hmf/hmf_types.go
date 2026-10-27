@@ -24,8 +24,42 @@ type HMF struct {
 
 	regionIDs        []string
 	activeShards     map[merkle.TreeID]struct{}
+	reservations     map[merkle.TreeID]*Reservation
+	nextReservation  uint64
 	pendingSealed    []*SegmentTree
 	candidatePending int
+	candidateChanges []HMFChangedNode
+}
+
+// HMFChangedNode is one candidate Merkle node to version in evidence storage.
+type HMFChangedNode struct {
+	TreeID merkle.TreeID
+	Node   merkle.MerkleNode
+}
+
+type HMFCandidateShard struct {
+	TreeID       merkle.TreeID
+	Root         [32]byte
+	SegmentCount int64
+	Height       int
+	Frontiers    []merkle.MerkleNode
+}
+
+type HMFCandidateRegion struct {
+	TreeID     merkle.TreeID
+	Root       [32]byte
+	ShardCount int64
+	Height     int
+}
+
+type HMFCandidateEvidence struct {
+	Epoch             uint64
+	GlobalRoot        [32]byte
+	GlobalRegionCount int64
+	GlobalHeight      int
+	Nodes             []HMFChangedNode
+	Shards            []HMFCandidateShard
+	Regions           []HMFCandidateRegion
 }
 
 type HMFWorkingState struct {
@@ -74,6 +108,7 @@ type SegmentTree struct {
 	*builder
 	MaxLeaves int
 	Sealed    bool
+	OpenedAt  time.Time
 	SealedAt  time.Time
 	persisted bool
 }

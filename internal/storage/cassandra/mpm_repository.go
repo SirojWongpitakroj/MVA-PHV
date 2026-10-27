@@ -324,7 +324,7 @@ func validateCandidateEvidence(candidate mpm.Candidate, evidence CandidateEviden
 		evidence.HMFGlobal.Scope != "GLOBAL" || evidence.HMFGlobal.RegionCount <= 0 ||
 		len(evidence.MVARegions) == 0 || len(evidence.MVAGlobalNodes) == 0 ||
 		len(evidence.HPBFShards) == 0 || len(evidence.HPBFRegions) == 0 ||
-		len(evidence.HPBFGlobalNodes) == 0 ||
+		(len(evidence.HPBFRegions) > 1 && len(evidence.HPBFGlobalNodes) == 0) ||
 		int64(len(evidence.MVARegions)) != evidence.HMFGlobal.RegionCount ||
 		len(evidence.HPBFRegions) != len(evidence.MVARegions) {
 		return fmt.Errorf("cassandra MPM repository: incomplete candidate authentication evidence")

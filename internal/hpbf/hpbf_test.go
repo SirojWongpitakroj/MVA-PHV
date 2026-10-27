@@ -500,3 +500,213 @@ func expectedMerkleRoot(t *testing.T, tag string, hashes [][32]byte) [32]byte {
 	}
 	return hashes[0]
 }
+
+func TestHPBFCandidateLifecycleAndReturnedEvidence(t *testing.T) {
+	const n, p = 64, 0.000001
+	h, err := NewHPBF(2, 2, n, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed := TokenRecord{RegionID: "0", ShardID: 0, SiteID: "sealed-site", DeviceID: "sealed-device", Type: "sealed-type"}
+	active := TokenRecord{RegionID: "0", ShardID: 1, SiteID: "active-site", DeviceID: "active-device", Type: "active-type"}
+	later := TokenRecord{RegionID: "1", ShardID: 0, SiteID: "later-site", DeviceID: "later-device", Type: "later-type"}
+	for _, record := range []TokenRecord{sealed, active} {
+		if err := h.AddToken(record.RegionID, record.ShardID, record.SiteID, record.DeviceID, record.Type); err != nil {
+			t.Fatal(err)
+		}
+	}
+	firstFinalized := h.Finalized
+	root1, err := h.PrepareCandidate(1, []TokenRecord{sealed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Finalized != firstFinalized || h.Finalized.Epoch != 0 || h.Candidate == nil || h.Candidate.Epoch != 1 || h.Working.Epoch != 2 {
+		t.Fatal("preparation did not keep Finalized and Working separate")
+	}
+	shards, regions, global, err := h.CandidatePartitions(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkHPBFPartitions(t, shards, regions, global, 1, 2, 2)
+	if root1 != global.RootHash {
+		t.Fatal("returned Global root differs from candidate")
+	}
+	expected1 := newExpectedFilters(t, 2, 2, n, p)
+	for _, token := range testTokens(t, sealed.SiteID, sealed.DeviceID, sealed.Type) {
+		expected1[0][0].Add(token)
+	}
+	if want := expectedSnapshotRoot(t, h.Candidate, expected1); want != root1 {
+		t.Fatalf("candidate root = %x, want %x", root1, want)
+	}
+	for _, token := range testTokens(t, active.SiteID, active.DeviceID, active.Type) {
+		if shards[1].BloomFilter.Contains(token) {
+			t.Fatal("active token entered candidate Shard")
+		}
+	}
+	if err := h.AddToken(later.RegionID, later.ShardID, later.SiteID, later.DeviceID, later.Type); err != nil {
+		t.Fatal(err)
+	}
+	if retry, err := h.PrepareCandidate(1, []TokenRecord{active, later}); err != nil || retry != root1 {
+		t.Fatalf("retry changed prepared candidate: %x, %v", retry, err)
+	}
+	// Returned filters and Merkle nodes must be detached from the prepared tree.
+	shards[0].BloomFilter.bits[0] ^= 1
+	regions[0].BloomFilter.bits[0] ^= 1
+	regions[0].InternalNodes[0][0].Hash[0] ^= 1
+	global.InternalNodes[0][0].Hash[0] ^= 1
+	againShards, againRegions, againGlobal, err := h.CandidatePartitions(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(againShards[0].BloomFilter.bits, expected1[0][0].bits) ||
+		againRegions[0].RootHash != h.Candidate.Global.Regions["0"].Root ||
+		againRegions[0].InternalNodes[0][0].Hash != h.Candidate.Global.Regions["0"].levels[1][0].Hash ||
+		againGlobal.InternalNodes[0][0].Hash != h.Candidate.Global.levels[1][0].Hash {
+		t.Fatal("returned evidence changed the prepared candidate")
+	}
+	if err := h.ValidateCandidate(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.CommitCandidate(1); err != nil {
+		t.Fatal(err)
+	}
+	if h.Finalized.Epoch != 1 || h.Finalized.Global.RootHash != root1 || h.Candidate != nil {
+		t.Fatal("promotion did not publish and clear candidate")
+	}
+	_, matchedShards, proof := h.CandidateRegionShards(testTokens(t, sealed.SiteID, sealed.DeviceID, sealed.Type))
+	if !slices.Contains(matchedShards, merkle.TreeID{Type: merkle.TreeShard, RegionID: "0", ShardID: 0}) || proof.Epoch != 1 {
+		t.Fatal("promoted sealed token is not searchable with its proof")
+	}
+	_, activeShards, _ := h.CandidateRegionShards(testTokens(t, active.SiteID, active.DeviceID, active.Type))
+	if len(activeShards) != 0 {
+		t.Fatal("active token became searchable before next promotion")
+	}
+	epoch, m, k, words, err := h.WorkingShardFilter("0", 1)
+	if err != nil || epoch != 2 || m == 0 || k == 0 || len(words) == 0 {
+		t.Fatalf("working filter metadata: %d/%d/%d, %v", epoch, m, k, err)
+	}
+	words[0] ^= 1
+	_, _, _, untouched, err := h.WorkingShardFilter("0", 1)
+	if err != nil || words[0] == untouched[0] {
+		t.Fatal("working filter snapshot shares storage")
+	}
+	root2, err := h.PrepareCandidate(2, []TokenRecord{active})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root2 == root1 || firstFinalized.Epoch != 0 || h.Finalized.Epoch != 1 {
+		t.Fatal("second preparation changed historical snapshot")
+	}
+	expected2 := newExpectedFilters(t, 2, 2, n, p)
+	for region := range expected1 {
+		for shard := range expected1[region] {
+			copy(expected2[region][shard].bits, expected1[region][shard].bits)
+		}
+	}
+	for _, token := range testTokens(t, active.SiteID, active.DeviceID, active.Type) {
+		expected2[0][1].Add(token)
+	}
+	if want := expectedSnapshotRoot(t, h.Candidate, expected2); want != root2 {
+		t.Fatalf("second candidate root = %x, want %x", root2, want)
+	}
+	secondShards, _, _, err := h.CandidatePartitions(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range testTokens(t, later.SiteID, later.DeviceID, later.Type) {
+		if secondShards[2].BloomFilter.Contains(token) {
+			t.Fatal("later working token entered epoch 2")
+		}
+	}
+	if err := h.CommitCandidate(2); err != nil {
+		t.Fatal(err)
+	}
+	_, activeShards, proof = h.CandidateRegionShards(testTokens(t, active.SiteID, active.DeviceID, active.Type))
+	if !slices.Contains(activeShards, merkle.TreeID{Type: merkle.TreeShard, RegionID: "0", ShardID: 1}) || proof.Epoch != 2 {
+		t.Fatal("second epoch did not publish active token")
+	}
+}
+
+func TestHPBFCandidateEmptyEpochAndErrors(t *testing.T) {
+	var nilHPBF *HPBF
+	if _, err := nilHPBF.PrepareCandidate(1, nil); err == nil {
+		t.Fatal("nil HPBF prepared")
+	}
+	h, err := NewHPBF(1, 2, 64, 0.000001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := h.CandidatePartitions(1); err == nil {
+		t.Fatal("unprepared partitions returned")
+	}
+	if err := h.ValidateCandidate(1); err == nil {
+		t.Fatal("unprepared candidate validated")
+	}
+	if err := h.CommitCandidate(1); err == nil {
+		t.Fatal("unprepared candidate promoted")
+	}
+	if _, err := h.PrepareCandidate(0, nil); err == nil {
+		t.Fatal("nonadvancing epoch prepared")
+	}
+	invalid := TokenRecord{RegionID: "missing", ShardID: 0, SiteID: "site", DeviceID: "device", Type: "type"}
+	if _, err := h.PrepareCandidate(1, []TokenRecord{invalid}); err == nil || h.Candidate != nil {
+		t.Fatal("invalid Shard record published a candidate")
+	}
+	sealed := TokenRecord{RegionID: "0", ShardID: 0, SiteID: "sealed", DeviceID: "device", Type: "type"}
+	if err := h.AddToken(sealed.RegionID, sealed.ShardID, sealed.SiteID, sealed.DeviceID, sealed.Type); err != nil {
+		t.Fatal(err)
+	}
+	root1, err := h.PrepareCandidate(1, []TokenRecord{sealed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.PrepareCandidate(2, nil); err == nil {
+		t.Fatal("conflicting epoch prepared")
+	}
+	if _, _, _, err := h.CandidatePartitions(2); err == nil {
+		t.Fatal("wrong epoch partitions returned")
+	}
+	if err := h.ValidateCandidate(2); err == nil {
+		t.Fatal("wrong epoch validated")
+	}
+	if err := h.CommitCandidate(2); err == nil || h.Finalized.Epoch != 0 {
+		t.Fatal("wrong epoch promoted")
+	}
+	if err := h.CommitCandidate(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.CommitCandidate(1); err == nil {
+		t.Fatal("candidate promoted twice")
+	}
+	active := TokenRecord{RegionID: "0", ShardID: 1, SiteID: "active", DeviceID: "device", Type: "type"}
+	if err := h.AddToken(active.RegionID, active.ShardID, active.SiteID, active.DeviceID, active.Type); err != nil {
+		t.Fatal(err)
+	}
+	emptyRoot, err := h.PrepareCandidate(2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emptyRoot == root1 {
+		t.Fatal("epoch-specific Shard commitments were reused")
+	}
+	shards, _, _, err := h.CandidatePartitions(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range testTokens(t, sealed.SiteID, sealed.DeviceID, sealed.Type) {
+		if !shards[0].BloomFilter.Contains(token) {
+			t.Fatal("empty epoch lost finalized filter bits")
+		}
+	}
+	for _, token := range testTokens(t, active.SiteID, active.DeviceID, active.Type) {
+		if shards[1].BloomFilter.Contains(token) {
+			t.Fatal("empty epoch included active token")
+		}
+	}
+	if _, _, _, _, err := h.WorkingShardFilter("missing", 0); err == nil {
+		t.Fatal("unknown Region returned working filter")
+	}
+	if _, _, _, _, err := h.WorkingShardFilter("0", 9); err == nil {
+		t.Fatal("unknown Shard returned working filter")
+	}
+}
