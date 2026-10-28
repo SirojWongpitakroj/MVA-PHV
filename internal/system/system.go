@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/SirojWongpitakroj/mva-phv/internal/canonicalize"
+	"github.com/SirojWongpitakroj/mva-phv/internal/cloudprovider"
 	"github.com/SirojWongpitakroj/mva-phv/internal/hmf"
 	"github.com/SirojWongpitakroj/mva-phv/internal/hpbf"
 	"github.com/SirojWongpitakroj/mva-phv/internal/mpm"
@@ -34,6 +35,7 @@ type System struct {
 	manager     *mpm.Manager
 	auditor     *phv.Auditor
 	evidence    *MemoryEvidence
+	ciphertexts cloudprovider.Provider
 	checkpoints *MemoryCheckpoints
 }
 
@@ -67,10 +69,11 @@ func New(config Config) (*System, error) {
 		return nil, fmt.Errorf("new system evidence: %w", err)
 	}
 	checkpoints := NewMemoryCheckpoints()
+	ciphertexts := cloudprovider.NewMemory()
 	manager, err := mpm.New(mpm.Options{
 		HMF: &mpm.HMFAdapter{Tree: h}, MVA: &mpm.MVAAdapter{Tree: m},
 		HPBF: &mpm.HPBFAdapter{Tree: p}, Encryptor: encryptor,
-		Locator: mpm.CanonicalLocator{}, Evidence: evidence, Checkpoints: checkpoints,
+		Locator: mpm.CanonicalLocator{}, Evidence: evidence, Ciphertexts: ciphertexts, Checkpoints: checkpoints,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("new system MPM: %w", err)
@@ -82,10 +85,10 @@ func New(config Config) (*System, error) {
 	auditor := &phv.Auditor{
 		Roots:  phv.CurrentRoots{Manager: manager, Checkpoints: checkpoints},
 		Pruner: phv.CurrentHPBFPruner{Tree: p}, Resolver: phv.CurrentMVAResolver{Tree: m},
-		Repository: evidence, Topology: phv.Topology{RegionIDs: regions, ShardsPerRegion: config.ShardsPerRegion},
+		Repository: evidence, Ciphertexts: ciphertexts, Topology: phv.Topology{RegionIDs: regions, ShardsPerRegion: config.ShardsPerRegion},
 		Workers: config.AuditWorkers,
 	}
-	return &System{manager: manager, auditor: auditor, evidence: evidence, checkpoints: checkpoints}, nil
+	return &System{manager: manager, auditor: auditor, evidence: evidence, ciphertexts: ciphertexts, checkpoints: checkpoints}, nil
 }
 
 func (s *System) Ingest(ctx context.Context, input mpm.Input, now time.Time) (mpm.Receipt, error) {

@@ -5,49 +5,6 @@ import (
 	"fmt"
 )
 
-func (s *Store) PutLog(ctx context.Context, r LogRecord) error {
-	if r.LeafID < 0 || r.ShardID < 0 || r.SegmentID < 0 {
-		return fmt.Errorf("cassandra: invalid log address")
-	}
-	return s.exec(ctx, `INSERT INTO logs_by_segment
-        (rid,sid,seg_id,leaf_id,log_id,site_id,device_id,event_type,event_ts_ns,
-         ciphertext,nonce,tag,associated_data,digest,locator_commitment,
-         hmf_leaf_commitment,ingested_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		r.RegionID, r.ShardID, r.SegmentID, r.LeafID, r.LogID,
-		r.SiteID, r.DeviceID, r.EventType, r.EventTSNS,
-		r.Ciphertext, r.Nonce, r.Tag, r.AssociatedData, r.Digest[:],
-		r.LocatorCommitment[:], r.HMFLeafCommitment[:], r.IngestedAt)
-}
-
-func (s *Store) GetLog(ctx context.Context, key SegmentKey, leafID int64) (r LogRecord, err error) {
-	r.SegmentKey, r.LeafID = key, leafID
-	var digest, locator, commitment []byte
-	err = s.one(ctx, `SELECT log_id,site_id,device_id,event_type,event_ts_ns,
-        ciphertext,nonce,tag,associated_data,digest,locator_commitment,
-        hmf_leaf_commitment,ingested_at FROM logs_by_segment
-        WHERE rid=? AND sid=? AND seg_id=? AND leaf_id=?`,
-		[]any{key.RegionID, key.ShardID, key.SegmentID, leafID}, func(rows Rows) error {
-			return rows.Scan(&r.LogID, &r.SiteID, &r.DeviceID, &r.EventType, &r.EventTSNS,
-				&r.Ciphertext, &r.Nonce, &r.Tag, &r.AssociatedData,
-				&digest, &locator, &commitment, &r.IngestedAt)
-		})
-	if err != nil {
-		return r, err
-	}
-	if r.Digest, err = parseHash(digest, "digest"); err != nil {
-		return r, err
-	}
-	if r.LocatorCommitment, err = parseHash(locator, "locator commitment"); err != nil {
-		return r, err
-	}
-	if r.HMFLeafCommitment, err = parseHash(commitment, "HMF leaf commitment"); err != nil {
-		return r, err
-	}
-	r.Ciphertext, r.Nonce, r.Tag, r.AssociatedData = blob(r.Ciphertext), blob(r.Nonce), blob(r.Tag), blob(r.AssociatedData)
-	return r, nil
-}
-
 func (s *Store) PutActiveSegment(ctx context.Context, r ActiveSegment) error {
 	if r.ShardID < 0 || r.NextSegmentID < 0 || r.SegmentID == nil ||
 		r.OpenedAtNS == nil || r.LeafCount == nil || *r.SegmentID < 0 ||

@@ -3,35 +3,39 @@ package phv
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"slices"
 	"sort"
 	"sync"
 	"time"
+	"uuid"
 
+	"github.com/SirojWongpitakroj/mva-phv/internal/cloudprovider"
+	"github.com/SirojWongpitakroj/mva-phv/internal/domain"
 	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
 )
 
 type Auditor struct {
-	Roots      TrustedRoots
-	Pruner     Pruner
-	Resolver   Resolver
-	Repository Repository
-	Topology   Topology
-	Workers    int
+	Roots       TrustedRoots
+	Pruner      Pruner
+	Resolver    Resolver
+	Repository  Repository
+	Ciphertexts cloudprovider.Reader
+	Topology    Topology
+	Workers     int
 }
 
 type groupResult struct {
 	nodes []Node
-	logs  []EncryptedRecord
 	err   error
 }
 
 func (a *Auditor) Audit(ctx context.Context, request Request) (Result, error) {
 	started := time.Now()
 	var out Result
-	if a == nil || a.Roots == nil || a.Resolver == nil || a.Repository == nil || request.Query == nil {
-		return out, fmt.Errorf("PHV: roots, resolver, repository, and query are required")
+	if a == nil || a.Roots == nil || a.Resolver == nil || a.Repository == nil || a.Ciphertexts == nil || request.Query == nil {
+		return out, fmt.Errorf("PHV: roots, resolver, repository, ciphertext provider, and query are required")
 	}
 	ids, err := a.Topology.orderedRegions()
 	if err != nil {
@@ -232,6 +236,22 @@ func (a *Auditor) Audit(ctx context.Context, request Request) (Result, error) {
 }
 
 func (a *Auditor) retrieve(ctx context.Context, plan Plan) ([]Node, []EncryptedRecord, int, int, error) {
+	// CP batches and CLS frontier groups are independent after MVA resolution.
+	type cpResult struct {
+		logs  []EncryptedRecord
+		calls int
+		err   error
+	}
+	cp := make(chan cpResult, 1)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		logs, calls, err := a.fetchCiphertexts(ctx, plan.Selected)
+		if err != nil {
+			cancel()
+		}
+		cp <- cpResult{logs, calls, err}
+	}()
 	workers := a.Workers
 	if workers <= 0 {
 		workers = 4
@@ -239,8 +259,6 @@ func (a *Auditor) retrieve(ctx context.Context, plan Plan) ([]Node, []EncryptedR
 	if workers > len(plan.Groups) {
 		workers = len(plan.Groups)
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	jobs := make(chan RetrievalGroup)
 	results := make(chan groupResult, len(plan.Groups))
 	var wg sync.WaitGroup
@@ -270,18 +288,6 @@ func (a *Auditor) retrieve(ctx context.Context, plan Plan) ([]Node, []EncryptedR
 						result.err = validateNodes(plan.Epoch, group.Positions, result.nodes)
 					}
 				}
-				if result.err == nil && len(group.Leaves) > 0 {
-					state.Lock()
-					calls++
-					state.Unlock()
-					result.logs, result.err = a.Repository.FetchLogs(ctx, group.Tree, group.Leaves)
-					if result.err != nil {
-						result.err = fmt.Errorf("%w: fetch logs for %v: %w", ErrRepositoryFailure, group.Tree, result.err)
-					}
-					if result.err == nil {
-						result.err = validateLogs(group.Tree, group.Leaves, result.logs)
-					}
-				}
 				if result.err != nil {
 					cancel()
 				}
@@ -305,14 +311,17 @@ func (a *Auditor) retrieve(ctx context.Context, plan Plan) ([]Node, []EncryptedR
 	wg.Wait()
 	close(results)
 	var nodes []Node
-	var logs []EncryptedRecord
 	var firstErr error
 	for result := range results {
 		if result.err != nil && firstErr == nil {
 			firstErr = result.err
 		}
 		nodes = append(nodes, result.nodes...)
-		logs = append(logs, result.logs...)
+	}
+	cpDone := <-cp
+	calls += cpDone.calls
+	if firstErr == nil {
+		firstErr = cpDone.err
 	}
 	if firstErr != nil {
 		return nil, nil, calls, maxActive, firstErr
@@ -330,6 +339,7 @@ func (a *Auditor) retrieve(ctx context.Context, plan Plan) ([]Node, []EncryptedR
 		}
 		return a.Index < b.Index
 	})
+	logs := cpDone.logs
 	sort.Slice(logs, func(i, j int) bool {
 		a, b := logs[i].Address, logs[j].Address
 		if a.RegionID != b.RegionID {
@@ -344,6 +354,138 @@ func (a *Auditor) retrieve(ctx context.Context, plan Plan) ([]Node, []EncryptedR
 		return a.LeafID < b.LeafID
 	})
 	return nodes, logs, calls, maxActive, nil
+}
+
+// fetchCiphertexts batches exact MVA-authenticated LogIDs. The external CP
+// receives a logical deployment region and LogIDs, never HMF positions.
+func (a *Auditor) fetchCiphertexts(ctx context.Context, selected []SelectedRecord) ([]EncryptedRecord, int, error) {
+	const batchSize = 128
+	type job struct {
+		region  string
+		records []SelectedRecord
+	}
+	byRegion := make(map[string][]SelectedRecord)
+	seen := make(map[uuid.UUID]struct{}, len(selected))
+	for _, record := range selected {
+		if record.LogID == (uuid.UUID{}) || record.Descriptor.RegionID != record.Address.RegionID {
+			return nil, 0, fmt.Errorf("%w: invalid MVA selected record", ErrEvidence)
+		}
+		if _, duplicate := seen[record.LogID]; duplicate {
+			return nil, 0, fmt.Errorf("%w: selected LogID", ErrDuplicateEvidence)
+		}
+		seen[record.LogID] = struct{}{}
+		byRegion[record.Address.RegionID] = append(byRegion[record.Address.RegionID], record)
+	}
+	regions := make([]string, 0, len(byRegion))
+	for region := range byRegion {
+		regions = append(regions, region)
+	}
+	sort.Strings(regions)
+	var jobs []job
+	for _, region := range regions {
+		records := byRegion[region]
+		for i := 0; i < len(records); i += batchSize {
+			end := min(i+batchSize, len(records))
+			jobs = append(jobs, job{region, records[i:end]})
+		}
+	}
+	workers := a.Workers
+	if workers <= 0 {
+		workers = 4
+	}
+	workers = min(workers, len(jobs))
+	type response struct {
+		records []EncryptedRecord
+		err     error
+	}
+	queue := make(chan job)
+	results := make(chan response, len(jobs))
+	var wg sync.WaitGroup
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for item := range queue {
+				ids := make([]uuid.UUID, len(item.records))
+				want := make(map[uuid.UUID]SelectedRecord, len(ids))
+				for i, record := range item.records {
+					ids[i] = record.LogID
+					want[record.LogID] = record
+				}
+				values, err := a.Ciphertexts.GetCiphertexts(ctx, item.region, ids)
+				if err != nil {
+					results <- response{err: fmt.Errorf("%w: CP batch: %w", ErrRepositoryFailure, err)}
+					cancel()
+					continue
+				}
+				got := make(map[uuid.UUID]struct{}, len(values))
+				out := make([]EncryptedRecord, 0, len(values))
+				for _, value := range values {
+					record, ok := want[value.LogID]
+					if !ok {
+						err = fmt.Errorf("%w: CP LogID %s", ErrUnexpectedEvidence, value.LogID)
+						break
+					}
+					if _, duplicate := got[value.LogID]; duplicate {
+						err = fmt.Errorf("%w: CP LogID %s", ErrDuplicateEvidence, value.LogID)
+						break
+					}
+					if len(value.Nonce) != 12 || len(value.Tag) != 16 || len(value.AD) == 0 {
+						err = fmt.Errorf("%w: malformed CP ciphertext", ErrEvidence)
+						break
+					}
+					got[value.LogID] = struct{}{}
+					content := make([]byte, 0, len(value.Nonce)+len(value.Ciphertext)+len(value.Tag))
+					content = append(content, value.Nonce...)
+					content = append(content, value.Ciphertext...)
+					content = append(content, value.Tag...)
+					digest := sha256.Sum256(content)
+					encoded, e := domain.Serialize([]byte("LOG"), value.LogID, record.Locator[:], digest[:])
+					if e != nil {
+						err = e
+						break
+					}
+					out = append(out, EncryptedRecord{SelectedRecord: record, Ciphertext: slices.Clone(value.Ciphertext), Nonce: slices.Clone(value.Nonce), Tag: slices.Clone(value.Tag), AD: slices.Clone(value.AD), Digest: digest, HMFLeaf: sha256.Sum256(encoded)})
+				}
+				if err == nil && len(got) != len(want) {
+					err = fmt.Errorf("%w: CP batch missing LogID", ErrMissingEvidence)
+				}
+				if err != nil {
+					cancel()
+				}
+				results <- response{records: out, err: err}
+			}
+		}()
+	}
+	go func() {
+		defer close(queue)
+		for _, item := range jobs {
+			select {
+			case queue <- item:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	wg.Wait()
+	close(results)
+	var out []EncryptedRecord
+	var firstErr error
+	for result := range results {
+		if firstErr == nil && result.err != nil {
+			firstErr = result.err
+		}
+		out = append(out, result.records...)
+	}
+	if firstErr != nil {
+		return nil, len(jobs), firstErr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, len(jobs), err
+	}
+	return out, len(jobs), nil
 }
 
 func validateNodes(epoch uint64, expected []NodeKey, got []Node) error {
@@ -366,31 +508,6 @@ func validateNodes(epoch uint64, expected []NodeKey, got []Node) error {
 	}
 	if len(seen) != len(wanted) {
 		return fmt.Errorf("%w: requested nodes", ErrMissingEvidence)
-	}
-	return nil
-}
-
-func validateLogs(tree merkle.TreeID, expected []int64, got []EncryptedRecord) error {
-	wanted := make(map[int64]struct{}, len(expected))
-	for _, leaf := range expected {
-		wanted[leaf] = struct{}{}
-	}
-	seen := make(map[int64]struct{}, len(got))
-	for _, log := range got {
-		a := log.Address
-		if a.RegionID != tree.RegionID || a.ShardID != tree.ShardID || a.SegmentID != tree.SegmentID {
-			return fmt.Errorf("%w: log outside Segment", ErrEvidence)
-		}
-		if _, ok := wanted[a.LeafID]; !ok {
-			return fmt.Errorf("%w: unexpected log leaf", ErrEvidence)
-		}
-		if _, duplicate := seen[a.LeafID]; duplicate {
-			return fmt.Errorf("%w: duplicate log leaf", ErrEvidence)
-		}
-		seen[a.LeafID] = struct{}{}
-	}
-	if len(seen) != len(wanted) {
-		return fmt.Errorf("%w: missing log leaf", ErrEvidence)
 	}
 	return nil
 }

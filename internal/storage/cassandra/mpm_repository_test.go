@@ -3,7 +3,6 @@ package cassandra
 import (
 	"context"
 	"errors"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -99,7 +98,7 @@ func TestMPMRepositoryPersistsAcceptedRecordAndWorkingState(t *testing.T) {
 	id := uuid.UUID{1}
 	address := mpm.Address{RegionID: "r0", ShardID: 2, SegmentID: 3, LeafID: 0}
 	record := mpm.Record{Log: domain.Log{LogID: id, RegionID: "r0", SiteID: "site", DevID: "dev", Type: "alert", TS: when,
-		Ciphertext: []byte{1, 2}, Nonce: []byte{3}, Tag: []byte{4}, AD: []byte{5}, Digest: [32]byte{6}},
+		Digest: [32]byte{6}},
 		Descriptor: mpm.Descriptor{RegionID: "r0", SiteID: "site", DeviceID: "dev", Type: "alert", TS: when},
 		Address:    address, AcceptedAt: when, Locator: [32]byte{7}, HMFLeaf: [32]byte{8}}
 	leaf := PagePayload{IsLeaf: true}
@@ -114,16 +113,20 @@ func TestMPMRepositoryPersistsAcceptedRecordAndWorkingState(t *testing.T) {
 	if err := repo.PersistAccepted(context.Background(), record, mv, hp); err != nil {
 		t.Fatal(err)
 	}
-	for table, want := range map[string]int{"logs_by_segment": 1, "mva_pages": 2, "mva_working_view_state": 2,
+	for table, want := range map[string]int{"mva_pages": 2, "mva_working_view_state": 2,
 		"hpbf_working_shard_filters": 1, "hmf_active_segments_by_shard": 1} {
 		if got := countWrites(client.writes, table); got != want {
 			t.Fatalf("%s writes=%d, want %d", table, got, want)
 		}
 	}
-	if !strings.Contains(client.writes[0].statement, "logs_by_segment") ||
-		!reflect.DeepEqual(client.writes[0].args[:4], []any{"r0", int64(2), int64(3), int64(0)}) {
-		t.Fatal("log did not use HMF physical address")
+	if countWrites(client.writes, "logs_by_segment") != 0 {
+		t.Fatal("CLS attempted to store external CP ciphertext")
 	}
+	record.Log.Ciphertext = []byte{1}
+	if err := repo.PersistAccepted(context.Background(), record, mv, hp); err == nil {
+		t.Fatal("CLS accepted external CP ciphertext payload")
+	}
+	record.Log.Ciphertext = nil
 	last := client.writes[len(client.writes)-1]
 	if !strings.Contains(last.statement, "hmf_active_segments_by_shard") || last.args[5] != int64(4) {
 		t.Fatal("active Segment recovery state is wrong")

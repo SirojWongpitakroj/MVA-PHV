@@ -2,16 +2,18 @@
 -- MPMRepository maps manager writes to the Store's bound CQL methods. A
 -- concrete Cassandra Client and prepared-candidate evidence source are
 -- supplied by the application; neither is a trusted checkpoint store.
--- Cassandra stores encrypted logs and potentially untrusted authentication
--- evidence. Its three mutable working tables support restart recovery only.
+-- Cassandra is internal Cloud Log Storage (CLS): it stores potentially
+-- untrusted MVA/HPBF/HMF evidence, never the external CP ciphertext payload.
+-- Its three mutable working tables support restart recovery only.
 -- PostgreSQL, outside this schema, stores epoch orchestration, candidate and
 -- finalized status, root tuples, checkpoint hashes, timestamps, and mock/real
 -- blockchain references. During testing it is the trusted append-only mock
 -- checkpoint store. Cassandra does not publish trusted checkpoints.
 --
 -- Write flow:
---   Ingest: logs_by_segment, hmf_active_segments_by_shard,
+--   Ingest: log_addresses_by_id, hmf_active_segments_by_shard,
 --           mva_pages/mva_working_view_state, hpbf_working_shard_filters.
+--           MPM writes ciphertext separately to the external Cloud Provider.
 --   Seal:   hmf_segments_by_shard and hmf_segment_nodes, then acknowledge the
 --           persisted Segment in HMF so its in-memory proof nodes can be freed.
 --   Commit: HMF changed hierarchy nodes and compact states; MVA view, region,
@@ -35,32 +37,8 @@ AND durable_writes = true;
 
 USE mva_phv;
 
--- Physical HMF address: (rid, sid, seg_id, leaf_id). HMF receives the already
--- computed d_i. The caller supplies c_i and encrypted fields from MPM/domain.Log.
--- event_ts_ns preserves Go time.Time precision; CQL timestamp is milliseconds.
-CREATE TABLE IF NOT EXISTS logs_by_segment (
-    rid                 text,
-    sid                 bigint,
-    seg_id              bigint,
-    leaf_id             bigint,
-    log_id              uuid,
-    site_id             text,
-    device_id           text,
-    event_type          text,
-    event_ts_ns         bigint,
-    ciphertext          blob,
-    nonce               blob,
-    tag                 blob,
-    associated_data     blob,
-    digest              blob,
-    locator_commitment  blob,
-    hmf_leaf_commitment blob,
-    ingested_at         timestamp,
-    PRIMARY KEY ((rid, sid, seg_id), leaf_id)
-) WITH CLUSTERING ORDER BY (leaf_id ASC);
-
--- A conditional insert reserves each LogID globally before writing its
--- physical Segment row. This is an operational uniqueness index, not a trust
+-- A conditional insert reserves each LogID against its HMF address. This is
+-- operational uniqueness metadata, not a ciphertext copy or trust
 -- anchor. A retry with the same address is idempotent; another address fails.
 CREATE TABLE IF NOT EXISTS log_addresses_by_id (
     log_id  uuid PRIMARY KEY,
@@ -73,7 +51,7 @@ CREATE TABLE IF NOT EXISTS log_addresses_by_id (
 -- Mutable per-Shard working recovery state, not historical evidence. Update
 -- after each HMF Insert; after sealing, clear active seg_id/opened_at_ns and
 -- leaf_count but retain next_seg_id so IDs remain monotonic across a restart.
--- These rows may be overwritten. Logs retain the active Segment's leaves.
+-- These rows may be overwritten. CP retains ciphertext; CLS retains evidence.
 CREATE TABLE IF NOT EXISTS hmf_active_segments_by_shard (
     rid             text,
     sid             bigint,

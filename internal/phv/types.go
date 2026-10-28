@@ -29,7 +29,7 @@ type SelectedRecord struct {
 	LogID      uuid.UUID
 	Descriptor mpm.Descriptor
 	// For a Log-ID query the ID view authenticates the address and locator;
-	// the descriptor is recovered from the log and checked against the locator.
+	// the descriptor is recovered from CP associated data and checked against the locator.
 	DescriptorFromLog bool
 	Address           mpm.Address
 	Locator           [32]byte
@@ -41,8 +41,8 @@ type EncryptedRecord struct {
 	Nonce      []byte
 	Tag        []byte
 	AD         []byte
-	Digest     [32]byte
-	HMFLeaf    [32]byte
+	Digest     [32]byte // derived from CP bytes by PHV, never trusted from CP
+	HMFLeaf    [32]byte // derived from Digest and authenticated MVA metadata
 }
 
 type Request struct {
@@ -82,13 +82,11 @@ type Resolver interface {
 	Resolve(ctx context.Context, epoch uint64, query mva.LocatorQuery, regions []merkle.TreeID, root [32]byte) (Resolution, error)
 }
 
-// Repository is the existing cloud evidence boundary expressed as the three
-// batched reads PHV needs. Implementations may use Cassandra, without exposing
-// CQL or driver types to PHV.
+// Repository reads only internal CLS authentication evidence. Ciphertext comes
+// through the independent external Cloud Provider reader.
 type Repository interface {
 	LeafCount(ctx context.Context, epoch uint64, tree merkle.TreeID) (int64, error)
 	FetchNodes(ctx context.Context, epoch uint64, tree merkle.TreeID, positions []NodeKey) ([]Node, error)
-	FetchLogs(ctx context.Context, segment merkle.TreeID, leaves []int64) ([]EncryptedRecord, error)
 }
 
 // PartitionMapper optionally exposes opaque physical retrieval groups. PHV
@@ -106,7 +104,7 @@ type RetrievalGroup struct {
 	Tree      merkle.TreeID
 	Partition string
 	Positions []NodeKey
-	Leaves    []int64 // populated for Segment log groups
+	Leaves    []int64 // selected Segment leaves for proof planning; CP is fetched by LogID
 }
 
 type Plan struct {

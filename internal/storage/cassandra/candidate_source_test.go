@@ -1,6 +1,7 @@
 package cassandra
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"uuid"
 
 	"github.com/SirojWongpitakroj/mva-phv/internal/canonicalize"
+	"github.com/SirojWongpitakroj/mva-phv/internal/cloudprovider"
 	"github.com/SirojWongpitakroj/mva-phv/internal/hmf"
 	"github.com/SirojWongpitakroj/mva-phv/internal/hpbf"
 	"github.com/SirojWongpitakroj/mva-phv/internal/mpm"
@@ -128,9 +130,10 @@ func TestConcreteMPMAdaptersIngestPrepareAndCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkpoints := &memoryCheckpoints{values: make(map[uint64][32]byte), fail: true}
+	provider := cloudprovider.NewMemory()
 	manager, err := mpm.NewMPM(mpm.Options{HMF: &mpm.HMFAdapter{Tree: h}, MVA: &mpm.MVAAdapter{Tree: v},
 		HPBF: &mpm.HPBFAdapter{Tree: p}, Encryptor: encryptor, Locator: mpm.CanonicalLocator{},
-		Evidence: repo, Checkpoints: checkpoints})
+		Evidence: repo, Ciphertexts: provider, Checkpoints: checkpoints})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,8 +145,12 @@ func TestConcreteMPMAdaptersIngestPrepareAndCommit(t *testing.T) {
 	if receipt.Address.LeafID != 0 || len(manager.PendingSegments()) != 1 {
 		t.Fatal("accepted log did not seal its Segment")
 	}
-	if countWrites(client.writes, "logs_by_segment") == 0 || countWrites(client.writes, "hmf_segment_nodes") == 0 {
-		t.Fatal("ingestion did not persist log and sealed evidence")
+	ciphertexts, err := provider.GetCiphertexts(context.Background(), "0", []uuid.UUID{receipt.LogID})
+	if err != nil || len(ciphertexts) != 1 || bytes.Equal(ciphertexts[0].Ciphertext, []byte("log")) {
+		t.Fatalf("external CP did not receive encrypted log by LogID: %+v, %v", ciphertexts, err)
+	}
+	if countWrites(client.writes, "logs_by_segment") != 0 || countWrites(client.writes, "hmf_segment_nodes") == 0 {
+		t.Fatal("CLS stored ciphertext or missed sealed HMF evidence")
 	}
 	candidate, err := manager.PrepareFinalization(context.Background(), 1)
 	if err != nil {

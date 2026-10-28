@@ -12,6 +12,7 @@ import (
 	"time"
 	"uuid"
 
+	"github.com/SirojWongpitakroj/mva-phv/internal/cloudprovider"
 	"github.com/SirojWongpitakroj/mva-phv/internal/domain"
 	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
 )
@@ -73,8 +74,8 @@ func NewMPM(options Options) (*MPM, error) { return New(options) }
 
 func New(options Options) (*Manager, error) {
 	if options.HMF == nil || options.MVA == nil || options.HPBF == nil || options.Encryptor == nil ||
-		options.Locator == nil || options.Evidence == nil || options.Checkpoints == nil {
-		return nil, fmt.Errorf("new MPM: HMF, MVA, HPBF, encryptor, locator, evidence, and checkpoint store are required")
+		options.Locator == nil || options.Evidence == nil || options.Checkpoints == nil || options.Ciphertexts == nil {
+		return nil, fmt.Errorf("new MPM: HMF, MVA, HPBF, encryptor, locator, evidence, ciphertext provider, and checkpoint store are required")
 	}
 	if options.IDs == nil {
 		options.IDs = randomIDs{}
@@ -185,6 +186,11 @@ func (m *Manager) Ingest(ctx context.Context, input Input, now time.Time) (Recei
 		Type: input.Type, TS: input.TS, Ciphertext: encrypted.Ciphertext, Nonce: encrypted.Nonce,
 		Tag: encrypted.Tag, AD: encrypted.AD, Digest: encrypted.Digest}
 	record := Record{Log: log, Descriptor: desc, Address: address, AcceptedAt: now, Locator: locator, HMFLeaf: leaf}
+	if err := m.opts.Ciphertexts.StoreCiphertext(ctx, input.RegionID, cloudprovider.Ciphertext{
+		LogID: id, Ciphertext: encrypted.Ciphertext, Nonce: encrypted.Nonce, Tag: encrypted.Tag, AD: encrypted.AD,
+	}); err != nil {
+		return abort(fmt.Errorf("ingest MPM: store ciphertext: %w", err), false)
+	}
 	mvaUpdate, err := m.opts.MVA.Ingest(record)
 	if err != nil {
 		return abort(fmt.Errorf("ingest MPM: MVA update: %w", err), true)
@@ -197,17 +203,15 @@ func (m *Manager) Ingest(ctx context.Context, input Input, now time.Time) (Recei
 		m.markIncomplete(err)
 		return Receipt{}, fmt.Errorf("ingest MPM: commit HMF address: %w", err)
 	}
+	// CLS receives only authentication metadata. The CP owns the encrypted bytes.
+	record.Log.Ciphertext, record.Log.Nonce, record.Log.Tag, record.Log.AD = nil, nil, nil, nil
 	if err = m.opts.Evidence.PersistAccepted(ctx, record, mvaUpdate, hpbfUpdate); err != nil {
 		m.markIncomplete(err)
 		return Receipt{LogID: id, Address: address, Locator: record.Locator, HMFLeaf: record.HMFLeaf}, fmt.Errorf("ingest MPM: persist accepted record: %w", err)
 	}
 	segID := merkle.TreeID{Type: merkle.TreeSegment, RegionID: address.RegionID, ShardID: address.ShardID, SegmentID: address.SegmentID}
-	// Ciphertext is already durable. Pending preparation needs only the
-	// descriptor, physical address, LogID, and commitments in memory.
-	record.Log.Ciphertext = nil
-	record.Log.Nonce = nil
-	record.Log.Tag = nil
-	record.Log.AD = nil
+	// Pending preparation needs only the descriptor, physical address, LogID,
+	// and commitments in memory.
 	m.mu.Lock()
 	m.records[segID] = append(m.records[segID], record)
 	m.mu.Unlock()

@@ -155,6 +155,9 @@ func (r *MPMRepository) PersistAccepted(ctx context.Context, record mpm.Record, 
 		record.Log.DevID != record.Descriptor.DeviceID || record.Log.Type != record.Descriptor.Type {
 		return fmt.Errorf("cassandra MPM repository: invalid accepted record")
 	}
+	if len(record.Log.Ciphertext)+len(record.Log.Nonce)+len(record.Log.Tag)+len(record.Log.AD) != 0 {
+		return fmt.Errorf("cassandra MPM repository: ciphertext belongs to external CP")
+	}
 	me, err := checkedEpoch(mv.WorkingEpoch)
 	if err != nil {
 		return err
@@ -205,13 +208,7 @@ func (r *MPMRepository) PersistAccepted(ctx context.Context, record mpm.Record, 
 			pageRows = append(pageRows, row)
 		}
 	}
-	log := LogRecord{SegmentKey: SegmentKey{RegionID: a.RegionID, ShardID: a.ShardID, SegmentID: a.SegmentID},
-		LeafID: a.LeafID, LogID: record.Log.LogID, SiteID: record.Descriptor.SiteID,
-		DeviceID: record.Descriptor.DeviceID, EventType: record.Descriptor.Type,
-		EventTSNS: record.Descriptor.TS.UnixNano(), Ciphertext: record.Log.Ciphertext,
-		Nonce: record.Log.Nonce, Tag: record.Log.Tag, AssociatedData: record.Log.AD,
-		Digest: record.Log.Digest, LocatorCommitment: record.Locator,
-		HMFLeafCommitment: record.HMFLeaf, IngestedAt: record.AcceptedAt}
+	key := SegmentKey{RegionID: a.RegionID, ShardID: a.ShardID, SegmentID: a.SegmentID}
 	// The first accepted leaf fixes OpenedAt. Later leaves read the existing
 	// recovery row so that a restart preserves the actual sealing deadline.
 	opened := record.AcceptedAt.UnixNano()
@@ -231,11 +228,8 @@ func (r *MPMRepository) PersistAccepted(ctx context.Context, record mpm.Record, 
 	segID, leafCount, nextID := a.SegmentID, a.LeafID+1, a.SegmentID+1
 	active := ActiveSegment{RegionID: a.RegionID, ShardID: a.ShardID, SegmentID: &segID,
 		OpenedAtNS: &opened, LeafCount: &leafCount, NextSegmentID: nextID}
-	if err := r.store.ReserveLogID(ctx, log.LogID, log.SegmentKey, log.LeafID); err != nil {
+	if err := r.store.ReserveLogID(ctx, record.Log.LogID, key, a.LeafID); err != nil {
 		return fmt.Errorf("persist LogID reservation: %w", err)
-	}
-	if err := r.store.PutLog(ctx, log); err != nil {
-		return fmt.Errorf("persist accepted log: %w", err)
 	}
 	for _, page := range pageRows {
 		if err := r.store.PutPage(ctx, page); err != nil {

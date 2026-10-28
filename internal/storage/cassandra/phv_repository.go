@@ -3,7 +3,6 @@ package cassandra
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
 	"github.com/SirojWongpitakroj/mva-phv/internal/mpm"
@@ -120,31 +119,6 @@ func (s *Store) FetchNodes(ctx context.Context, epoch uint64, tree merkle.TreeID
 			return nil, fmt.Errorf("cassandra PHV: unsupported tree type %q", tree.Type)
 		}
 		result = append(result, node)
-	}
-	return result, nil
-}
-
-// FetchLogs reads only MVA-authenticated leaves in one physical Segment.
-func (s *Store) FetchLogs(ctx context.Context, segment merkle.TreeID, leaves []int64) ([]phv.EncryptedRecord, error) {
-	if segment.Type != merkle.TreeSegment {
-		return nil, fmt.Errorf("cassandra PHV: log group is not a Segment")
-	}
-	key := SegmentKey{RegionID: segment.RegionID, ShardID: segment.ShardID, SegmentID: segment.SegmentID}
-	result := make([]phv.EncryptedRecord, 0, len(leaves))
-	for _, leaf := range leaves {
-		row, err := s.GetLog(ctx, key, leaf)
-		if err != nil {
-			return nil, err
-		}
-		address := mpm.Address{RegionID: row.RegionID, ShardID: row.ShardID, SegmentID: row.SegmentID, LeafID: row.LeafID}
-		result = append(result, phv.EncryptedRecord{
-			SelectedRecord: phv.SelectedRecord{LogID: row.LogID,
-				Descriptor: mpm.Descriptor{RegionID: row.RegionID, SiteID: row.SiteID, DeviceID: row.DeviceID,
-					Type: row.EventType, TS: time.Unix(0, row.EventTSNS).UTC()},
-				Address: address, Locator: row.LocatorCommitment},
-			Ciphertext: row.Ciphertext, Nonce: row.Nonce, Tag: row.Tag, AD: row.AssociatedData,
-			Digest: row.Digest, HMFLeaf: row.HMFLeafCommitment,
-		})
 	}
 	return result, nil
 }

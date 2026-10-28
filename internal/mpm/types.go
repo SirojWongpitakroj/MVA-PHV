@@ -5,6 +5,7 @@ import (
 	"time"
 	"uuid"
 
+	"github.com/SirojWongpitakroj/mva-phv/internal/cloudprovider"
 	"github.com/SirojWongpitakroj/mva-phv/internal/domain"
 	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
 	"github.com/SirojWongpitakroj/mva-phv/internal/mva"
@@ -165,8 +166,8 @@ type LocatorCommitter interface {
 }
 
 type EvidenceRepository interface {
-	// PersistAccepted must durably store the encrypted log and working recovery
-	// updates before MPM reports success. It must reject a LogID collision even
+	// PersistAccepted stores only CLS metadata and working recovery updates.
+	// It must reject a LogID collision even
 	// after process restart; MPM's in-memory set covers concurrent local calls.
 	PersistAccepted(ctx context.Context, record Record, mva MVAUpdate, hpbf HPBFUpdate) error
 	// PersistSealed is idempotent for the same immutable Segment and proof nodes.
@@ -192,6 +193,7 @@ type Options struct {
 	HMF         HMF
 	MVA         MVA
 	HPBF        HPBF
+	Ciphertexts cloudprovider.Writer
 	Encryptor   Encryptor
 	Locator     LocatorCommitter
 	Evidence    EvidenceRepository

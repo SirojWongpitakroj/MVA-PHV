@@ -19,8 +19,8 @@ import (
 type MemoryEvidence struct {
 	mu          sync.RWMutex
 	hmf         *hmf.HMF
-	logs        map[mpm.Address]phv.EncryptedRecord
 	logIDs      map[uuid.UUID]mpm.Address
+	addresses   map[mpm.Address]uuid.UUID
 	segments    map[merkle.TreeID]mpm.Segment
 	segmentNode map[phv.NodeKey]phv.Node
 	higherNode  map[phv.NodeKey]map[uint64]phv.Node
@@ -30,8 +30,9 @@ type MemoryEvidence struct {
 
 func newMemoryEvidence(numRegions, shardsPerRegion int, tree *hmf.HMF) (*MemoryEvidence, error) {
 	r := &MemoryEvidence{
-		hmf: tree, logs: make(map[mpm.Address]phv.EncryptedRecord),
+		hmf:    tree,
 		logIDs: make(map[uuid.UUID]mpm.Address), segments: make(map[merkle.TreeID]mpm.Segment),
+		addresses:   make(map[mpm.Address]uuid.UUID),
 		segmentNode: make(map[phv.NodeKey]phv.Node), higherNode: make(map[phv.NodeKey]map[uint64]phv.Node),
 		shardCount: make(map[merkle.TreeID]map[uint64]int64), candidates: make(map[uint64]mpm.Roots),
 	}
@@ -67,14 +68,6 @@ func (r *MemoryEvidence) seed(id merkle.TreeID, nodes []merkle.MerkleNode) {
 	}
 }
 
-func copyEncrypted(record phv.EncryptedRecord) phv.EncryptedRecord {
-	record.Ciphertext = append([]byte(nil), record.Ciphertext...)
-	record.Nonce = append([]byte(nil), record.Nonce...)
-	record.Tag = append([]byte(nil), record.Tag...)
-	record.AD = append([]byte(nil), record.AD...)
-	return record
-}
-
 func (r *MemoryEvidence) PersistAccepted(ctx context.Context, record mpm.Record, _ mpm.MVAUpdate, _ mpm.HPBFUpdate) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -88,16 +81,14 @@ func (r *MemoryEvidence) PersistAccepted(ctx context.Context, record mpm.Record,
 	if _, exists := r.logIDs[record.Log.LogID]; exists {
 		return fmt.Errorf("memory evidence: duplicate LogID %s", record.Log.LogID)
 	}
-	if _, exists := r.logs[record.Address]; exists {
+	if len(record.Log.Ciphertext)+len(record.Log.Nonce)+len(record.Log.Tag)+len(record.Log.AD) != 0 {
+		return fmt.Errorf("memory evidence: ciphertext belongs to external CP")
+	}
+	if _, exists := r.addresses[record.Address]; exists {
 		return fmt.Errorf("memory evidence: duplicate physical address %+v", record.Address)
 	}
-	r.logs[record.Address] = copyEncrypted(phv.EncryptedRecord{
-		SelectedRecord: phv.SelectedRecord{LogID: record.Log.LogID, Descriptor: record.Descriptor,
-			Address: record.Address, Locator: record.Locator},
-		Ciphertext: record.Log.Ciphertext, Nonce: record.Log.Nonce, Tag: record.Log.Tag,
-		AD: record.Log.AD, Digest: record.Log.Digest, HMFLeaf: record.HMFLeaf,
-	})
 	r.logIDs[record.Log.LogID] = record.Address
+	r.addresses[record.Address] = record.Log.LogID
 	return nil
 }
 
@@ -152,7 +143,7 @@ func (r *MemoryEvidence) PersistSealed(ctx context.Context, segment mpm.Segment,
 	for i := int64(0); i < segment.LeafCount; i++ {
 		address := mpm.Address{RegionID: segment.ID.RegionID, ShardID: segment.ID.ShardID,
 			SegmentID: segment.ID.SegmentID, LeafID: i}
-		if _, exists := r.logs[address]; !exists {
+		if _, exists := r.addresses[address]; !exists {
 			return fmt.Errorf("memory evidence: missing accepted log at %+v", address)
 		}
 	}
@@ -288,28 +279,6 @@ func (r *MemoryEvidence) FetchNodes(ctx context.Context, epoch uint64, id merkle
 			return nil, fmt.Errorf("memory evidence: missing hierarchy node %v at epoch %d", key, epoch)
 		}
 		result = append(result, selected)
-	}
-	return result, nil
-}
-
-func (r *MemoryEvidence) FetchLogs(ctx context.Context, segment merkle.TreeID, leaves []int64) ([]phv.EncryptedRecord, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if r == nil || segment.Type != merkle.TreeSegment {
-		return nil, fmt.Errorf("memory evidence: invalid Segment")
-	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	result := make([]phv.EncryptedRecord, 0, len(leaves))
-	for _, leaf := range leaves {
-		address := mpm.Address{RegionID: segment.RegionID, ShardID: segment.ShardID,
-			SegmentID: segment.SegmentID, LeafID: leaf}
-		log, exists := r.logs[address]
-		if !exists {
-			return nil, fmt.Errorf("memory evidence: missing log at %+v", address)
-		}
-		result = append(result, copyEncrypted(log))
 	}
 	return result, nil
 }

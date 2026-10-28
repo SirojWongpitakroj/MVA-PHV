@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"time"
-	"uuid"
 )
 
 // Record types mirror schema.cql. Hashes are fixed-size so malformed blobs are
@@ -15,24 +14,6 @@ type SegmentKey struct {
 	RegionID  string
 	ShardID   int64
 	SegmentID int64
-}
-
-type LogRecord struct {
-	SegmentKey
-	LeafID            int64
-	LogID             uuid.UUID
-	SiteID            string
-	DeviceID          string
-	EventType         string
-	EventTSNS         int64
-	Ciphertext        []byte
-	Nonce             []byte
-	Tag               []byte
-	AssociatedData    []byte
-	Digest            [32]byte
-	LocatorCommitment [32]byte
-	HMFLeafCommitment [32]byte
-	IngestedAt        time.Time
 }
 
 type ActiveSegment struct {

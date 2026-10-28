@@ -9,6 +9,8 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"time"
+	"uuid"
 
 	"github.com/SirojWongpitakroj/mva-phv/internal/domain"
 	"github.com/SirojWongpitakroj/mva-phv/internal/hmf"
@@ -48,7 +50,14 @@ func recordHash(selected SelectedRecord, log EncryptedRecord) ([32]byte, []Failu
 	}
 	descriptor := selected.Descriptor
 	if selected.DescriptorFromLog {
-		descriptor = log.Descriptor
+		var tag, region, site, device, typ string
+		var logID uuid.UUID
+		var timestamp time.Time
+		if err := domain.Deserialize(log.AD, &tag, &logID, &region, &site, &device, &typ, &timestamp); err != nil || tag != "MVA-PHV:LOG:V1" || logID != selected.LogID {
+			issue("encrypted log associated data is malformed or has a different LogID")
+		} else {
+			descriptor = mpm.Descriptor{RegionID: region, SiteID: site, DeviceID: device, Type: typ, TS: timestamp}
+		}
 	}
 	locator, err := (mpm.CanonicalLocator{}).CommitLocator(selected.LogID, descriptor, selected.Address)
 	if err != nil {

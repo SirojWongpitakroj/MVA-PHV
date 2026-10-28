@@ -14,6 +14,7 @@ import (
 	"time"
 	"uuid"
 
+	"github.com/SirojWongpitakroj/mva-phv/internal/cloudprovider"
 	"github.com/SirojWongpitakroj/mva-phv/internal/domain"
 	"github.com/SirojWongpitakroj/mva-phv/internal/hmf"
 	"github.com/SirojWongpitakroj/mva-phv/internal/hpbf"
@@ -54,9 +55,6 @@ func (r *sparseCountRepo) LeafCount(_ context.Context, _ uint64, _ merkle.TreeID
 }
 func (*sparseCountRepo) FetchNodes(context.Context, uint64, merkle.TreeID, []NodeKey) ([]Node, error) {
 	panic("planning fetched proof nodes")
-}
-func (*sparseCountRepo) FetchLogs(context.Context, merkle.TreeID, []int64) ([]EncryptedRecord, error) {
-	panic("planning fetched logs")
 }
 
 func newProofRepo() *proofRepo {
@@ -109,28 +107,28 @@ func (r *proofRepo) FetchNodes(_ context.Context, _ uint64, id merkle.TreeID, po
 	}
 	return nodes, nil
 }
-func (r *proofRepo) FetchLogs(_ context.Context, id merkle.TreeID, leaves []int64) ([]EncryptedRecord, error) {
+
+// The test CP is a separate interface: audits request only authenticated
+// LogIDs, while proofRepo's node methods model CLS.
+func (r *proofRepo) GetCiphertexts(_ context.Context, region string, ids []uuid.UUID) ([]cloudprovider.Ciphertext, error) {
 	if r.delay > 0 {
 		time.Sleep(r.delay)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	var logs []EncryptedRecord
-	for _, leaf := range leaves {
-		address := mpm.Address{RegionID: id.RegionID, ShardID: id.ShardID, SegmentID: id.SegmentID, LeafID: leaf}
-		log, ok := r.logs[address]
-		if !ok {
-			return nil, fmt.Errorf("missing log")
+	var out []cloudprovider.Ciphertext
+	for _, id := range ids {
+		for _, log := range r.logs {
+			if log.LogID == id && log.Address.RegionID == region {
+				out = append(out, cloudprovider.Ciphertext{LogID: log.LogID, Ciphertext: slices.Clone(log.Ciphertext), Nonce: slices.Clone(log.Nonce), Tag: slices.Clone(log.Tag), AD: slices.Clone(log.AD)})
+				break
+			}
 		}
-		logs = append(logs, log)
 	}
 	if r.reverse {
-		slices.Reverse(logs)
+		slices.Reverse(out)
 	}
-	if r.shuffle {
-		r.rng.Shuffle(len(logs), func(i, j int) { logs[i], logs[j] = logs[j], logs[i] })
-	}
-	return logs, nil
+	return out, nil
 }
 
 type fixedRoots struct{ value mpm.Roots }
@@ -286,7 +284,8 @@ func newFixture(t *testing.T) fixture {
 			if err != nil {
 				t.Fatal(err)
 			}
-			nonce, cipher, tag := []byte{1, byte(leaf)}, []byte{byte(len(records) + 7)}, []byte{9}
+			nonce, cipher, tag := make([]byte, 12), []byte{byte(len(records) + 7)}, make([]byte, 16)
+			nonce[0], nonce[1], tag[0] = 1, byte(leaf), 9
 			content := append(append(slices.Clone(nonce), cipher...), tag...)
 			digest := sha256.Sum256(content)
 			ad, err := domain.Serialize("MVA-PHV:LOG:V1", id, desc.RegionID, desc.SiteID, desc.DeviceID, desc.Type, desc.TS.UTC())
@@ -487,7 +486,7 @@ func TestAuditSharedMultiproofAndLocalization(t *testing.T) {
 	f.repo.delay = time.Millisecond
 	query := mva.AttrRangeQuery{SiteID: "site", DevID: "device-0", Type: "alarm", StartTS: time.Unix(0, 0), EndTS: time.Unix(100, 0)}
 	selected := []SelectedRecord{f.records[0], f.records[1], f.records[3], f.records[6]}
-	a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{selected, 1}, Repository: f.repo, Topology: f.topology, Workers: 4}
+	a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{selected, 1}, Repository: f.repo, Ciphertexts: f.repo, Topology: f.topology, Workers: 4}
 	result, err := a.Audit(context.Background(), Request{Epoch: 1, Query: query})
 	if err != nil {
 		t.Fatal(err)
@@ -568,7 +567,7 @@ func TestProofDeterministicAcrossOneHundredShuffledAudits(t *testing.T) {
 	selected := []SelectedRecord{f.records[0], f.records[1], f.records[3], f.records[6]}
 	selectionRNG := rand.New(rand.NewSource(77))
 	query := mva.AttrRangeQuery{SiteID: "site", DevID: "device-0", Type: "alarm", StartTS: time.Unix(0, 0), EndTS: time.Unix(100, 0)}
-	a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Repository: f.repo, Topology: f.topology, Workers: 4}
+	a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Repository: f.repo, Ciphertexts: f.repo, Topology: f.topology, Workers: 4}
 	var baseline []byte
 	for run := 0; run < 100; run++ {
 		order := slices.Clone(selected)
@@ -595,7 +594,7 @@ func TestAuditRejectsMissingAndDuplicateEvidence(t *testing.T) {
 		t.Run(string(kind), func(t *testing.T) {
 			f := newFixture(t)
 			query := mva.AttrRangeQuery{SiteID: "site", DevID: "device-0", Type: "alarm", StartTS: time.Unix(0, 0), EndTS: time.Unix(100, 0)}
-			a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{f.records[:1], 1}, Repository: f.repo, Topology: f.topology}
+			a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{f.records[:1], 1}, Repository: f.repo, Ciphertexts: f.repo, Topology: f.topology}
 			plan, err := BuildPlan(context.Background(), f.repo, 1, f.topology, f.records[:1])
 			if err != nil {
 				t.Fatal(err)
@@ -629,7 +628,7 @@ func TestAuditRejectsMissingAndDuplicateEvidence(t *testing.T) {
 func TestAuditRejectsUnexpectedAndFutureNodes(t *testing.T) {
 	f := newFixture(t)
 	query := mva.AttrRangeQuery{SiteID: "site", DevID: "device-0", Type: "alarm", StartTS: time.Unix(0, 0), EndTS: time.Unix(100, 0)}
-	a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{f.records[:1], 1}, Repository: f.repo, Topology: f.topology}
+	a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{f.records[:1], 1}, Repository: f.repo, Ciphertexts: f.repo, Topology: f.topology}
 	f.repo.extra = &Node{Key: NodeKey{Tree: merkle.TreeID{Type: merkle.TreeSegment, RegionID: "0", ShardID: 0, SegmentID: 0}, Level: 0, Index: 999}}
 	if _, err := a.Audit(context.Background(), Request{Epoch: 1, Query: query}); !errors.Is(err, ErrEvidence) {
 		t.Fatalf("unexpected evidence error=%v", err)
@@ -682,7 +681,7 @@ func TestAuditBoundsConcurrentRetrievalAndHonorsCancellation(t *testing.T) {
 	f.repo.delay = 25 * time.Millisecond
 	selected := []SelectedRecord{f.records[0], f.records[3], f.records[5], f.records[6]}
 	query := mva.AttrRangeQuery{SiteID: "site", DevID: "device-0", Type: "alarm", StartTS: time.Unix(0, 0), EndTS: time.Unix(100, 0)}
-	a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{selected, 1}, Repository: f.repo, Topology: f.topology, Workers: 2}
+	a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{selected, 1}, Repository: f.repo, Ciphertexts: f.repo, Topology: f.topology, Workers: 2}
 	result, err := a.Audit(context.Background(), Request{Epoch: 1, Query: query})
 	if err != nil || !result.Verified || result.Metrics.MaxConcurrent != 2 {
 		t.Fatalf("bounded retrieval: %+v, %v", result.Metrics, err)
@@ -698,7 +697,7 @@ func TestLocatorBindingRejectsEachChangedField(t *testing.T) {
 	f := newFixture(t)
 	selected := []SelectedRecord{f.records[0]}
 	query := mva.AttrRangeQuery{SiteID: "site", DevID: "device-0", Type: "alarm", StartTS: time.Unix(0, 0), EndTS: time.Unix(100, 0)}
-	a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{selected, 1}, Repository: f.repo, Topology: f.topology}
+	a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{selected, 1}, Repository: f.repo, Ciphertexts: f.repo, Topology: f.topology}
 	base, err := a.Audit(context.Background(), Request{Epoch: 1, Query: query})
 	if err != nil || !base.Verified {
 		t.Fatal(err)
@@ -734,7 +733,7 @@ func TestAuditSingleLeafSegment(t *testing.T) {
 	record := f.records[5] // Region 0 / Shard 1 / Segment 0 has one leaf.
 	query := mva.AttrRangeQuery{SiteID: record.Descriptor.SiteID, DevID: record.Descriptor.DeviceID,
 		Type: record.Descriptor.Type, StartTS: record.Descriptor.TS, EndTS: record.Descriptor.TS}
-	a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{[]SelectedRecord{record}, 1}, Repository: f.repo, Topology: f.topology}
+	a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{[]SelectedRecord{record}, 1}, Repository: f.repo, Ciphertexts: f.repo, Topology: f.topology}
 	result, err := a.Audit(context.Background(), Request{Epoch: 1, Query: query})
 	if err != nil || !result.Verified {
 		t.Fatalf("one-leaf audit=%+v err=%v", result, err)
@@ -750,7 +749,7 @@ func TestAuditProofPortableAcrossRegions(t *testing.T) {
 	query := mva.AttrRangeQuery{SiteID: "site", DevID: "device-0", Type: "alarm",
 		StartTS: time.Unix(0, 0), EndTS: time.Unix(100, 0)}
 	a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{selected, 1},
-		Repository: f.repo, Topology: f.topology}
+		Repository: f.repo, Ciphertexts: f.repo, Topology: f.topology}
 	result, err := a.Audit(context.Background(), Request{Epoch: 1, Query: query})
 	if err != nil || !result.Verified {
 		t.Fatalf("audit verified=%v err=%v", result.Verified, err)
@@ -796,18 +795,25 @@ func TestAuditRejectsWrongAddressAndStoredLeaf(t *testing.T) {
 	record := f.records[0]
 	query := mva.AttrRangeQuery{SiteID: record.Descriptor.SiteID, DevID: record.Descriptor.DeviceID,
 		Type: record.Descriptor.Type, StartTS: record.Descriptor.TS, EndTS: record.Descriptor.TS}
-	a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{[]SelectedRecord{record}, 1}, Repository: f.repo, Topology: f.topology}
-	log := f.repo.logs[record.Address]
-	log.Address.LeafID++
-	f.repo.logs[record.Address] = log
-	if _, err := a.Audit(context.Background(), Request{Epoch: 1, Query: query}); !errors.Is(err, ErrEvidence) {
-		t.Fatalf("wrong physical address error=%v", err)
+	a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{[]SelectedRecord{record}, 1}, Repository: f.repo, Ciphertexts: f.repo, Topology: f.topology}
+	wrong := record
+	wrong.Address.LeafID++
+	a.Resolver = fixedResolver{[]SelectedRecord{wrong}, 1}
+	if result, err := a.Audit(context.Background(), Request{Epoch: 1, Query: query}); err == nil && result.Verified {
+		t.Fatal("MVA-selected wrong physical address was accepted")
 	}
-	log.Address = record.Address
-	log.HMFLeaf[0] ^= 0xff
+	a.Resolver = fixedResolver{[]SelectedRecord{record}, 1}
+	log := f.repo.logs[record.Address]
+	log.Ciphertext[0] ^= 0xff
 	f.repo.logs[record.Address] = log
 	result, err := a.Audit(context.Background(), Request{Epoch: 1, Query: query})
-	if err != nil || result.Verified || len(result.Failures) == 0 || result.Failures[0].LogID != record.LogID {
+	confirmed := false
+	for _, failure := range result.Failures {
+		if failure.LogID == record.LogID && !failure.Unresolved {
+			confirmed = true
+		}
+	}
+	if err != nil || result.Verified || !confirmed {
 		t.Fatalf("altered stored leaf result=%+v err=%v", result, err)
 	}
 }
@@ -836,7 +842,7 @@ func TestAuditTreatsCorruptFrontierAsUnresolved(t *testing.T) {
 			node := f.repo.nodes[key]
 			node.Hash[0] ^= 0xff
 			f.repo.nodes[key] = node
-			a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{selected, 1}, Repository: f.repo, Topology: f.topology}
+			a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{selected, 1}, Repository: f.repo, Ciphertexts: f.repo, Topology: f.topology}
 			result, err := a.Audit(context.Background(), Request{Epoch: 1, Query: query})
 			if err != nil || result.Verified {
 				t.Fatalf("result=%+v err=%v", result, err)
@@ -861,7 +867,7 @@ func TestLocalizationRejectsForgedMatchingReference(t *testing.T) {
 	f := newFixture(t)
 	selected := []SelectedRecord{f.records[0]}
 	query := mva.AttrRangeQuery{SiteID: "site", DevID: "device-0", Type: "alarm", StartTS: time.Unix(0, 0), EndTS: time.Unix(100, 0)}
-	a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{selected, 1}, Repository: f.repo, Topology: f.topology}
+	a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{selected, 1}, Repository: f.repo, Ciphertexts: f.repo, Topology: f.topology}
 	valid, err := a.Audit(context.Background(), Request{Epoch: 1, Query: query})
 	if err != nil || !valid.Verified {
 		t.Fatal(err)
@@ -1047,7 +1053,7 @@ func TestHistoricalCheckpointEpochsAndCandidateRejection(t *testing.T) {
 		checkpoints[epoch] = sha256.Sum256(data)
 	}
 	query := mva.AttrRangeQuery{SiteID: "site", DevID: "device-0", Type: "alarm", StartTS: time.Unix(0, 0), EndTS: time.Unix(100, 0)}
-	a := Auditor{Roots: CheckpointRoots{Evidence: evidence, Checkpoints: checkpoints}, Resolver: fixedResolver{f.records[:1], 4}, Repository: f.repo, Topology: f.topology}
+	a := Auditor{Roots: CheckpointRoots{Evidence: evidence, Checkpoints: checkpoints}, Resolver: fixedResolver{f.records[:1], 4}, Repository: f.repo, Ciphertexts: f.repo, Topology: f.topology}
 	old, err := a.Audit(context.Background(), Request{Epoch: 4, Query: query})
 	if err != nil || !old.Verified || old.Proof.Epoch != 4 {
 		t.Fatalf("historical audit=%+v, %v", old.Metrics, err)
@@ -1133,7 +1139,7 @@ func TestAuditHistoricalMVAHPBFAndHMFAtTwoFinalizedEpochs(t *testing.T) {
 	}
 	a := Auditor{Roots: CheckpointRoots{Evidence: roots, Checkpoints: checkpoints},
 		Resolver: HistoricalMVAResolver{Reader: mvaSnapshotHistory{1: oldMVA, 2: index.Finalized}},
-		Pruner:   HistoricalHPBFPruner{Source: hpbfHistory{1: proof1, 2: proof2}}, Repository: f.repo, Topology: f.topology}
+		Pruner:   HistoricalHPBFPruner{Source: hpbfHistory{1: proof1, 2: proof2}}, Repository: f.repo, Ciphertexts: f.repo, Topology: f.topology}
 	query := mva.AttrRangeQuery{SiteID: d.SiteID, DevID: d.DeviceID, Type: d.Type, StartTS: d.TS, EndTS: d.TS}
 	for _, epoch := range []uint64{2, 1} {
 		result, err := a.Audit(context.Background(), Request{Epoch: epoch, Query: query, Tokens: tokens, UsePruning: true})
@@ -1153,7 +1159,7 @@ func TestAuditHistoricalMVAHPBFAndHMFAtTwoFinalizedEpochs(t *testing.T) {
 func TestAuditEmptyAndWrongEpoch(t *testing.T) {
 	f := newFixture(t)
 	query := mva.AttrRangeQuery{SiteID: "none", DevID: "none", Type: "none", StartTS: time.Unix(0, 0), EndTS: time.Unix(1, 0)}
-	a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{nil, 1}, Repository: f.repo, Topology: f.topology}
+	a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{nil, 1}, Repository: f.repo, Ciphertexts: f.repo, Topology: f.topology}
 	result, err := a.Audit(context.Background(), Request{Epoch: 1, Query: query})
 	if err != nil || !result.Verified || len(result.Proof.Nodes) != 0 {
 		t.Fatalf("empty result=%+v err=%v", result, err)
@@ -1205,7 +1211,7 @@ func TestAuditIntegratesFinalizedMVAHPBFAndHMF(t *testing.T) {
 	query := mva.AttrRangeQuery{SiteID: target.SiteID, DevID: target.DeviceID, Type: target.Type,
 		StartTS: target.TS, EndTS: target.TS}
 	a := Auditor{Roots: fixedRoots{mpm.Roots{MVA: mvaRoot, HMF: f.root, HPBF: hpbfRoot}},
-		Resolver: CurrentMVAResolver{index}, Pruner: CurrentHPBFPruner{filter}, Repository: f.repo, Topology: f.topology}
+		Resolver: CurrentMVAResolver{index}, Pruner: CurrentHPBFPruner{filter}, Repository: f.repo, Ciphertexts: f.repo, Topology: f.topology}
 	result, err := a.Audit(context.Background(), Request{Epoch: 1, Query: query, Tokens: [3][]byte{site, siteDevice, full}, UsePruning: true})
 	if err != nil || !result.Verified || len(result.Proof.Logs) != 1 || result.Proof.Logs[0].LogID != f.records[0].LogID {
 		t.Fatalf("integrated audit=%+v err=%v", result, err)

@@ -10,6 +10,7 @@ import (
 	"time"
 	"uuid"
 
+	"github.com/SirojWongpitakroj/mva-phv/internal/cloudprovider"
 	"github.com/SirojWongpitakroj/mva-phv/internal/domain"
 	"github.com/SirojWongpitakroj/mva-phv/internal/hmf"
 	"github.com/SirojWongpitakroj/mva-phv/internal/hpbf"
@@ -38,8 +39,20 @@ func (g *testIDs) NewID() (uuid.UUID, error) {
 
 type testEncrypt struct{}
 
-func (testEncrypt) Encrypt(_ context.Context, _ uuid.UUID, _ Descriptor, plain []byte) (Encrypted, error) {
-	return Encrypted{Ciphertext: append([]byte(nil), plain...), Digest: sha256.Sum256(plain)}, nil
+type failingCiphertexts struct{}
+
+func (failingCiphertexts) StoreCiphertext(context.Context, string, cloudprovider.Ciphertext) error {
+	return errors.New("external CP unavailable")
+}
+
+func (testEncrypt) Encrypt(_ context.Context, id uuid.UUID, descriptor Descriptor, plain []byte) (Encrypted, error) {
+	nonce, tag := make([]byte, 12), make([]byte, 16)
+	ad, err := domain.Serialize("MVA-PHV:LOG:V1", id, descriptor.RegionID, descriptor.SiteID, descriptor.DeviceID, descriptor.Type, descriptor.TS.UTC())
+	if err != nil {
+		return Encrypted{}, err
+	}
+	content := append(append(append([]byte{}, nonce...), plain...), tag...)
+	return Encrypted{Ciphertext: append([]byte(nil), plain...), Nonce: nonce, Tag: tag, AD: ad, Digest: sha256.Sum256(content)}, nil
 }
 
 type testLocator struct{}
@@ -372,7 +385,7 @@ func newRig(t *testing.T, max int64) *rig {
 	t.Helper()
 	r := &rig{h: newTestHMF(max, time.Hour), v: &testMVA{}, b: &testHPBF{}, e: &testEvidence{}, c: &testCheckpoints{roots: map[uint64][32]byte{}}}
 	var err error
-	r.manager, err = New(Options{HMF: r.h, MVA: r.v, HPBF: r.b, Encryptor: testEncrypt{}, Locator: testLocator{}, Evidence: r.e, Checkpoints: r.c, IDs: &testIDs{}})
+	r.manager, err = New(Options{Ciphertexts: cloudprovider.NewMemory(), HMF: r.h, MVA: r.v, HPBF: r.b, Encryptor: testEncrypt{}, Locator: testLocator{}, Evidence: r.e, Checkpoints: r.c, IDs: &testIDs{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,6 +393,25 @@ func newRig(t *testing.T, max int64) *rig {
 }
 func input(device string) Input {
 	return Input{RegionID: "r0", SiteID: "site", DeviceID: device, Type: "alarm", TS: time.Unix(100, 0), Plaintext: []byte(device)}
+}
+
+func TestCPFailurePreventsCLSAcceptanceAndFinalization(t *testing.T) {
+	r := newRig(t, 1)
+	r.manager.opts.Ciphertexts = failingCiphertexts{}
+	input := Input{RegionID: "r0", SiteID: "site", DeviceID: "device", Type: "alarm", TS: time.Unix(1, 0), Plaintext: []byte("log")}
+	receipt, err := r.manager.Ingest(context.Background(), input, time.Unix(1, 0))
+	if err == nil || receipt.LogID != (uuid.UUID{}) || len(r.e.accepted) != 0 ||
+		len(r.v.received) != 0 || len(r.b.received) != 0 || len(r.h.inserted) != 0 {
+		t.Fatalf("CP failure should abort before authenticated updates: %+v, %v", receipt, err)
+	}
+	if err := r.manager.workingError(); err != nil {
+		t.Fatalf("CP failure poisoned an otherwise unchanged manager: %v", err)
+	}
+	r.manager.opts.Ciphertexts = cloudprovider.NewMemory()
+	retry, err := r.manager.Ingest(context.Background(), input, time.Unix(1, 0))
+	if err != nil || retry.Address.LeafID != 0 || retry.Address.SegmentID != 0 {
+		t.Fatalf("reservation was not reusable after CP failure: %+v, %v", retry, err)
+	}
 }
 
 func TestIngestBindsSameAddressAcrossStructures(t *testing.T) {
@@ -705,7 +737,7 @@ func TestConcreteAdaptersCoordinateSealedCandidates(t *testing.T) {
 	}
 	evidence := &testEvidence{}
 	checkpoints := &testCheckpoints{roots: map[uint64][32]byte{}}
-	manager, err := New(Options{HMF: &HMFAdapter{Tree: h}, MVA: &MVAAdapter{Tree: v},
+	manager, err := New(Options{Ciphertexts: cloudprovider.NewMemory(), HMF: &HMFAdapter{Tree: h}, MVA: &MVAAdapter{Tree: v},
 		HPBF: &HPBFAdapter{Tree: b}, Encryptor: testEncrypt{}, Locator: CanonicalLocator{},
 		Evidence: evidence, Checkpoints: checkpoints, IDs: &testIDs{}})
 	if err != nil {
