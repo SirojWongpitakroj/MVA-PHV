@@ -316,7 +316,7 @@ func TestLocatorAndLeafCommitmentsRejectChangedInputs(t *testing.T) {
 		{"tag", func(c *cloudprovider.Ciphertext) { c.Tag[0] ^= 1 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			changed := cloudprovider.Ciphertext{LogID: cp.LogID, Ciphertext: slices.Clone(cp.Ciphertext), Nonce: slices.Clone(cp.Nonce), Tag: slices.Clone(cp.Tag), AD: slices.Clone(cp.AD)}
+			changed := cloudprovider.Ciphertext{LogID: cp.LogID, Ciphertext: slices.Clone(cp.Ciphertext), Nonce: slices.Clone(cp.Nonce), Tag: slices.Clone(cp.Tag), AD: slices.Clone(cp.AD), Version: cp.Version}
 			tc.mutate(&changed)
 			content := append(append(slices.Clone(changed.Nonce), changed.Ciphertext...), changed.Tag...)
 			digest := sha256.Sum256(content)

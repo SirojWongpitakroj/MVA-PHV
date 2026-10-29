@@ -2,13 +2,53 @@ package system
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
+	"uuid"
 
+	"github.com/SirojWongpitakroj/mva-phv/internal/cloudprovider"
+	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
 	"github.com/SirojWongpitakroj/mva-phv/internal/mpm"
 	"github.com/SirojWongpitakroj/mva-phv/internal/mva"
 	"github.com/SirojWongpitakroj/mva-phv/internal/phv"
+	"github.com/SirojWongpitakroj/mva-phv/internal/storage/cassandra"
 )
+
+type connectTestCQL struct{}
+
+func (connectTestCQL) Exec(context.Context, string, ...any) error { return nil }
+func (connectTestCQL) Query(context.Context, string, ...any) (cassandra.Rows, error) {
+	return nil, nil
+}
+func (connectTestCQL) ExecIfNotExists(context.Context, string, ...any) (bool, error) {
+	return true, nil
+}
+
+func TestNewWithStorageUsesDistinctPersistenceBoundaries(t *testing.T) {
+	cls, err := cassandra.NewStore(connectTestCQL{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp := cloudprovider.NewMemory()
+	checkpoints := NewMemoryCheckpoints()
+	s, err := NewWithStorage(testConfig(), cp, cls, checkpoints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.ciphertexts != cp || s.auditor.Repository != cls || s.trusted != checkpoints || s.evidence != nil {
+		t.Fatal("persistent system reused a memory evidence store or changed an injected dependency")
+	}
+	if _, ok := s.auditor.Roots.(phv.CheckpointRoots); !ok {
+		t.Fatal("persistent audits did not authenticate CLS roots against the checkpoint store")
+	}
+	if _, ok := s.auditor.Pruner.(phv.HistoricalHPBFPruner); !ok {
+		t.Fatal("persistent audits did not read finalized HPBF evidence")
+	}
+	if _, ok := s.auditor.Resolver.(phv.HistoricalMVAResolver); !ok {
+		t.Fatal("persistent audits did not read finalized MVA evidence")
+	}
+}
 
 func testConfig() Config {
 	return Config{NumRegions: 2, ShardsPerRegion: 2, MaxSegmentSize: 2,
@@ -33,6 +73,117 @@ func TestNewRejectsInvalidConfiguration(t *testing.T) {
 		if _, err := New(config); err == nil {
 			t.Fatalf("accepted invalid config %+v", config)
 		}
+	}
+}
+
+func TestNewWithProviderSharesExternalCPAcrossIngestionAndAudit(t *testing.T) {
+	if _, err := NewWithProvider(testConfig(), nil); err == nil {
+		t.Fatal("nil CP accepted")
+	}
+	provider := cloudprovider.NewMemory()
+	config := testConfig()
+	config.MaxSegmentSize = 1
+	s, err := NewWithProvider(config, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.ciphertexts != provider {
+		t.Fatal("injected CP was replaced")
+	}
+	ctx := context.Background()
+	input := mpm.Input{RegionID: "0", SiteID: "P3", DeviceID: "P3_LIT01", Type: "LevelReading", TS: time.Unix(500, 0), Plaintext: []byte("sensor event")}
+	receipt, err := s.Ingest(ctx, input, input.TS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values, err := provider.GetCiphertexts(ctx, "0", []uuid.UUID{receipt.LogID})
+	if err != nil || len(values) != 1 {
+		t.Fatalf("injected CP did not receive log: %+v, %v", values, err)
+	}
+	if _, err := s.PrepareFinalization(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitFinalization(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.Audit(ctx, phv.Request{Epoch: 1, Query: mva.LogIDQuery{ID: receipt.LogID}})
+	if err != nil || !result.Verified {
+		t.Fatalf("audit did not use injected CP: verified=%v err=%v", result.Verified, err)
+	}
+}
+
+type countingCiphertextReader struct {
+	cloudprovider.Reader
+	calls int
+}
+
+func (r *countingCiphertextReader) GetCiphertexts(ctx context.Context, region string, ids []uuid.UUID) ([]cloudprovider.Ciphertext, error) {
+	r.calls++
+	return r.Reader.GetCiphertexts(ctx, region, ids)
+}
+
+func TestCheckpointOutageStopsAuditBeforeCPRead(t *testing.T) {
+	config := testConfig()
+	config.MaxSegmentSize = 1
+	s, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	input := mpm.Input{RegionID: "0", SiteID: "P3", DeviceID: "P3_LIT01", Type: "LevelReading", TS: time.Unix(700, 0), Plaintext: []byte("event")}
+	receipt, err := s.Ingest(ctx, input, input.TS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PrepareFinalization(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitFinalization(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	spy := &countingCiphertextReader{Reader: s.ciphertexts}
+	s.auditor.Ciphertexts = spy
+	s.checkpoints.mu.Lock()
+	delete(s.checkpoints.values, 1)
+	s.checkpoints.mu.Unlock()
+	if _, err := s.Audit(ctx, phv.Request{Epoch: 1, Query: mva.LogIDQuery{ID: receipt.LogID}}); err == nil || spy.calls != 0 {
+		t.Fatalf("CP queried without trusted checkpoint: calls=%d err=%v", spy.calls, err)
+	}
+}
+
+func TestCLSEvidenceOutageIsNotCiphertextTampering(t *testing.T) {
+	s, err := New(testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	input := mpm.Input{RegionID: "0", SiteID: "P3", DeviceID: "P3_LIT01", Type: "LevelReading", TS: time.Unix(800, 0), Plaintext: []byte("event")}
+	first, err := s.Ingest(ctx, input, input.TS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.TS = input.TS.Add(time.Second)
+	if _, err := s.Ingest(ctx, input, input.TS); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PrepareFinalization(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitFinalization(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	segment := merkle.TreeID{Type: merkle.TreeSegment, RegionID: first.Address.RegionID, ShardID: first.Address.ShardID, SegmentID: first.Address.SegmentID}
+	// The second leaf is the first leaf's required frontier sibling.
+	s.evidence.mu.Lock()
+	delete(s.evidence.segmentNode, phv.NodeKey{Tree: segment, Level: 0, Index: 1})
+	s.evidence.mu.Unlock()
+	result, err := s.Audit(ctx, phv.Request{Epoch: 1, Query: mva.LogIDQuery{ID: first.LogID}})
+	if !errors.Is(err, phv.ErrRepositoryFailure) || !result.Unresolved || result.Verified {
+		t.Fatalf("missing CLS frontier classified as tampering: verified=%v unresolved=%v err=%v", result.Verified, result.Unresolved, err)
+	}
+	values, err := s.ciphertexts.GetCiphertexts(ctx, "0", []uuid.UUID{first.LogID})
+	if err != nil || len(values) != 1 {
+		t.Fatalf("CP was incorrectly tied to CLS outage: %+v, %v", values, err)
 	}
 }
 

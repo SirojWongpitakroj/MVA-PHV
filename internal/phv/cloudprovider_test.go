@@ -43,9 +43,17 @@ func (cp *faultCP) GetCiphertexts(ctx context.Context, region string, ids []uuid
 		if len(values) > 0 {
 			values[0].Nonce = nil
 		}
+	case "version":
+		if len(values) > 0 {
+			values[0].Version++
+		}
 	case "changed":
 		if len(values) > 0 {
 			values[0].Ciphertext[0] ^= 0xff
+		}
+	case "nonce":
+		if len(values) > 0 {
+			values[0].Nonce[0] ^= 0xff
 		}
 	}
 	return values, nil
@@ -60,6 +68,7 @@ func TestExternalCPCiphertextValidationAfterMVA(t *testing.T) {
 		{"duplicate", ErrDuplicateEvidence},
 		{"unexpected", ErrUnexpectedEvidence},
 		{"malformed", ErrEvidence},
+		{"version", cloudprovider.ErrUnsupportedVersion},
 		{"unavailable", ErrRepositoryFailure},
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
@@ -77,14 +86,18 @@ func TestExternalCPCiphertextValidationAfterMVA(t *testing.T) {
 }
 
 func TestAlteredCPCiphertextIsCryptographicMismatch(t *testing.T) {
-	f := newFixture(t)
-	selected := f.records[0]
-	cp := &faultCP{base: f.repo, mode: "changed"}
-	a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{[]SelectedRecord{selected}, 1}, Repository: f.repo, Ciphertexts: cp, Topology: f.topology}
-	query := mva.AttrRangeQuery{SiteID: selected.Descriptor.SiteID, DevID: selected.Descriptor.DeviceID, Type: selected.Descriptor.Type, StartTS: selected.Descriptor.TS, EndTS: selected.Descriptor.TS}
-	result, err := a.Audit(context.Background(), Request{Epoch: 1, Query: query})
-	if err != nil || result.Verified || result.Unresolved || !errors.Is(result.IntegrityError, ErrHMFRootMismatch) {
-		t.Fatalf("modified CP ciphertext err=%v result=%+v", err, result)
+	for _, mode := range []string{"changed", "nonce"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newFixture(t)
+			selected := f.records[0]
+			cp := &faultCP{base: f.repo, mode: mode}
+			a := Auditor{Roots: fixedRoots{mpm.Roots{HMF: f.root}}, Resolver: fixedResolver{[]SelectedRecord{selected}, 1}, Repository: f.repo, Ciphertexts: cp, Topology: f.topology}
+			query := mva.AttrRangeQuery{SiteID: selected.Descriptor.SiteID, DevID: selected.Descriptor.DeviceID, Type: selected.Descriptor.Type, StartTS: selected.Descriptor.TS, EndTS: selected.Descriptor.TS}
+			result, err := a.Audit(context.Background(), Request{Epoch: 1, Query: query})
+			if err != nil || result.Verified || result.Unresolved || !errors.Is(result.IntegrityError, ErrHMFRootMismatch) {
+				t.Fatalf("modified CP %s err=%v result=%+v", mode, err, result)
+			}
+		})
 	}
 }
 
@@ -124,7 +137,7 @@ func (cp *measuringCP) GetCiphertexts(ctx context.Context, _ string, ids []uuid.
 	}
 	values := make([]cloudprovider.Ciphertext, len(ids))
 	for i, id := range ids {
-		values[i] = cloudprovider.Ciphertext{LogID: id, Ciphertext: []byte{1}, Nonce: make([]byte, 12), Tag: make([]byte, 16), AD: []byte{1}}
+		values[i] = cloudprovider.Ciphertext{LogID: id, Ciphertext: []byte{1}, Nonce: make([]byte, 12), Tag: make([]byte, 16), AD: []byte{1}, Version: cloudprovider.EncryptionVersionAESGCM}
 	}
 	return values, nil
 }

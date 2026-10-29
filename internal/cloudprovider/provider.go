@@ -15,6 +15,23 @@ type Ciphertext struct {
 	Nonce      []byte
 	Tag        []byte
 	AD         []byte
+	Version    uint16 // Version 1 is the current AES-256-GCM encoding.
+}
+
+const EncryptionVersionAESGCM uint16 = 1
+
+var ErrUnsupportedVersion = errors.New("cloud provider: unsupported encryption version")
+
+// ValidateCiphertext checks retrieval metadata only. Authentication remains
+// the auditor's job against the finalized checkpoint.
+func ValidateCiphertext(value Ciphertext) error {
+	if value.Version != EncryptionVersionAESGCM {
+		return ErrUnsupportedVersion
+	}
+	if value.LogID == (uuid.UUID{}) || len(value.Nonce) != 12 || len(value.Tag) != 16 || len(value.AD) == 0 {
+		return fmt.Errorf("cloud provider: malformed encrypted record")
+	}
+	return nil
 }
 
 // Region is a deployment routing hint, not an HMF address. LogID is the only

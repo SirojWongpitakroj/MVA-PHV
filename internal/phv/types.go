@@ -41,6 +41,7 @@ type EncryptedRecord struct {
 	Nonce      []byte
 	Tag        []byte
 	AD         []byte
+	Version    uint16   // CP encryption format, checked before proof assembly.
 	Digest     [32]byte // derived from CP bytes by PHV, never trusted from CP
 	HMFLeaf    [32]byte // derived from Digest and authenticated MVA metadata
 }

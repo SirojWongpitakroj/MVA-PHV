@@ -432,8 +432,8 @@ func (a *Auditor) fetchCiphertexts(ctx context.Context, selected []SelectedRecor
 						err = fmt.Errorf("%w: CP LogID %s", ErrDuplicateEvidence, value.LogID)
 						break
 					}
-					if len(value.Nonce) != 12 || len(value.Tag) != 16 || len(value.AD) == 0 {
-						err = fmt.Errorf("%w: malformed CP ciphertext", ErrEvidence)
+					if check := cloudprovider.ValidateCiphertext(value); check != nil {
+						err = fmt.Errorf("%w: %w", ErrEvidence, check)
 						break
 					}
 					got[value.LogID] = struct{}{}
@@ -447,7 +447,7 @@ func (a *Auditor) fetchCiphertexts(ctx context.Context, selected []SelectedRecor
 						err = e
 						break
 					}
-					out = append(out, EncryptedRecord{SelectedRecord: record, Ciphertext: slices.Clone(value.Ciphertext), Nonce: slices.Clone(value.Nonce), Tag: slices.Clone(value.Tag), AD: slices.Clone(value.AD), Digest: digest, HMFLeaf: sha256.Sum256(encoded)})
+					out = append(out, EncryptedRecord{SelectedRecord: record, Ciphertext: slices.Clone(value.Ciphertext), Nonce: slices.Clone(value.Nonce), Tag: slices.Clone(value.Tag), AD: slices.Clone(value.AD), Version: value.Version, Digest: digest, HMFLeaf: sha256.Sum256(encoded)})
 				}
 				if err == nil && len(got) != len(want) {
 					err = fmt.Errorf("%w: CP batch missing LogID", ErrMissingEvidence)

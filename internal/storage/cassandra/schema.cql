@@ -152,14 +152,14 @@ CREATE TABLE IF NOT EXISTS hmf_global_state_by_epoch (
 -- its working epoch. Repeated updates to the same page in that epoch upsert the
 -- same row. Once PostgreSQL marks the epoch finalized, its page versions must
 -- not be mutated. Earlier versions remain for historical Resolve/proof reads.
--- view is 'id' or
+-- view_kind is 'id' or
 -- 'attribute', matching mva.ViewType. page_bucket=floor(page_id / 256).
 -- page_data needs a canonical, versioned Page codec including ordered keys,
 -- values or children, and child hashes. Page.Hash alone cannot reconstruct a
 -- locator proof. Parent/neighbor IDs are also stored for navigation.
 CREATE TABLE IF NOT EXISTS mva_pages (
     rid             text,
-    view            text,
+    view_kind       text,
     page_bucket     bigint,
     page_id         bigint,
     version_epoch   bigint,
@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS mva_pages (
     next_page_id    bigint,
     page_hash       blob,
     page_data       blob,
-    PRIMARY KEY ((rid, view, page_bucket), page_id, version_epoch)
+    PRIMARY KEY ((rid, view_kind, page_bucket), page_id, version_epoch)
 ) WITH CLUSTERING ORDER BY (page_id ASC, version_epoch DESC);
 
 -- Mutable working recovery metadata for each Region/view, not historical
@@ -178,7 +178,7 @@ CREATE TABLE IF NOT EXISTS mva_pages (
 -- working epoch starts from the cumulative prior working view.
 CREATE TABLE IF NOT EXISTS mva_working_view_state (
     rid             text,
-    view            text,
+    view_kind       text,
     working_epoch   bigint,
     root_page_id    bigint,
     root_hash       blob,
@@ -186,14 +186,14 @@ CREATE TABLE IF NOT EXISTS mva_working_view_state (
     record_count    bigint,
     next_page_id    bigint,
     tree_order      int,
-    PRIMARY KEY ((rid), view)
+    PRIMARY KEY ((rid), view_kind)
 );
 
 -- Finalized locator roots from RegionMVASnapshot, one row per Region/view/epoch.
 -- Persist initial root pages even for an empty view before its first manifest.
 CREATE TABLE IF NOT EXISTS mva_region_view_state_by_epoch (
     rid             text,
-    view            text,
+    view_kind       text,
     epoch           bigint,
     root_page_id    bigint,
     root_hash       blob,
@@ -201,7 +201,7 @@ CREATE TABLE IF NOT EXISTS mva_region_view_state_by_epoch (
     record_count    bigint,
     next_page_id    bigint,
     tree_order      int,
-    PRIMARY KEY ((rid, view), epoch)
+    PRIMARY KEY ((rid, view_kind), epoch)
 ) WITH CLUSTERING ORDER BY (epoch DESC);
 
 -- Complete per-epoch Region manifest, in canonical MVA.Regions order.
@@ -319,7 +319,7 @@ CREATE TABLE IF NOT EXISTS hpbf_epoch_roots (
 -- SELECT * FROM hmf_shard_state_by_epoch
 -- WHERE rid=? AND sid=? AND epoch<=? LIMIT 1;
 -- SELECT * FROM mva_pages
--- WHERE rid=? AND view=? AND page_bucket=? AND page_id=?
+-- WHERE rid=? AND view_kind=? AND page_bucket=? AND page_id=?
 --   AND version_epoch<=? LIMIT 1;
 -- SELECT * FROM hpbf_shard_filter_versions
 -- WHERE rid=? AND sid=? AND version_epoch<=? LIMIT 1;

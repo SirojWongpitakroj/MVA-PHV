@@ -52,7 +52,7 @@ type observedCP struct {
 
 func (cp *observedCP) StoreCiphertext(_ context.Context, region string, value cloudprovider.Ciphertext) error {
 	if !cp.l.called || region != cp.l.encrypt.desc.RegionID || value.LogID != cp.l.encrypt.id ||
-		len(value.Nonce) != 12 || len(value.Tag) != 16 || len(value.AD) == 0 ||
+		len(value.Nonce) != 12 || len(value.Tag) != 16 || len(value.AD) == 0 || value.Version != cloudprovider.EncryptionVersionAESGCM ||
 		len(cp.h.reserved) != 1 || len(cp.h.inserted) != 0 || len(cp.v.received) != 0 ||
 		len(cp.b.received) != 0 || len(cp.e.accepted) != 0 {
 		return errors.New("CP write occurred before commitments or after authenticated updates")

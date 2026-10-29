@@ -33,12 +33,8 @@ func clone(value Ciphertext) Ciphertext {
 	return value
 }
 
-func valid(value Ciphertext) bool {
-	return value.LogID != (uuid.UUID{}) && len(value.Nonce) == 12 && len(value.Tag) == 16 && len(value.AD) > 0
-}
-
 func same(a, b Ciphertext) bool {
-	return a.LogID == b.LogID && bytes.Equal(a.Ciphertext, b.Ciphertext) &&
+	return a.LogID == b.LogID && a.Version == b.Version && bytes.Equal(a.Ciphertext, b.Ciphertext) &&
 		bytes.Equal(a.Nonce, b.Nonce) && bytes.Equal(a.Tag, b.Tag) && bytes.Equal(a.AD, b.AD)
 }
 
@@ -46,8 +42,11 @@ func (m *Memory) StoreCiphertext(ctx context.Context, region string, value Ciphe
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if m == nil || region == "" || !valid(value) {
+	if m == nil || region == "" {
 		return fmt.Errorf("cloud provider: invalid ciphertext or region")
+	}
+	if err := ValidateCiphertext(value); err != nil {
+		return err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()

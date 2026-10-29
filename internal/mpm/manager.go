@@ -188,6 +188,7 @@ func (m *Manager) Ingest(ctx context.Context, input Input, now time.Time) (Recei
 	record := Record{Log: log, Descriptor: desc, Address: address, AcceptedAt: now, Locator: locator, HMFLeaf: leaf}
 	if err := m.opts.Ciphertexts.StoreCiphertext(ctx, input.RegionID, cloudprovider.Ciphertext{
 		LogID: id, Ciphertext: encrypted.Ciphertext, Nonce: encrypted.Nonce, Tag: encrypted.Tag, AD: encrypted.AD,
+		Version: cloudprovider.EncryptionVersionAESGCM,
 	}); err != nil {
 		return abort(fmt.Errorf("ingest MPM: store ciphertext: %w", err), false)
 	}

@@ -27,7 +27,7 @@ func (s *Store) PutPage(ctx context.Context, r PageVersion) error {
 		return err
 	}
 	return s.exec(ctx, `INSERT INTO mva_pages
-        (rid,view,page_bucket,page_id,version_epoch,is_leaf,parent_page_id,
+        (rid,view_kind,page_bucket,page_id,version_epoch,is_leaf,parent_page_id,
          prev_page_id,next_page_id,page_hash,page_data)
         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 		r.RegionID, r.View, bucket, r.PageID, r.VersionEpoch, r.IsLeaf,
@@ -50,7 +50,7 @@ func (s *Store) GetPageAt(ctx context.Context, rid, view string, pageID int64, e
 	var hash []byte
 	err = s.one(ctx, `SELECT version_epoch,is_leaf,parent_page_id,prev_page_id,
         next_page_id,page_hash,page_data FROM mva_pages
-        WHERE rid=? AND view=? AND page_bucket=? AND page_id=?
+        WHERE rid=? AND view_kind=? AND page_bucket=? AND page_id=?
         AND version_epoch<=? LIMIT 1`,
 		[]any{rid, view, bucket, pageID, e}, func(rows Rows) error {
 			return rows.Scan(&r.VersionEpoch, &r.IsLeaf, &r.ParentPageID,
@@ -77,7 +77,7 @@ func (s *Store) PutWorkingViewState(ctx context.Context, r ViewState) error {
 		return fmt.Errorf("cassandra: invalid working MVA view state")
 	}
 	return s.exec(ctx, `INSERT INTO mva_working_view_state
-        (rid,view,working_epoch,root_page_id,root_hash,tree_height,
+        (rid,view_kind,working_epoch,root_page_id,root_hash,tree_height,
          record_count,next_page_id,tree_order) VALUES (?,?,?,?,?,?,?,?,?)`,
 		r.RegionID, r.View, r.Epoch, r.RootPageID, r.RootHash[:],
 		r.TreeHeight, r.RecordCount, r.NextPageID, r.TreeOrder)
@@ -91,7 +91,7 @@ func (s *Store) GetWorkingViewState(ctx context.Context, rid, view string) (r Vi
 	var root []byte
 	err = s.one(ctx, `SELECT working_epoch,root_page_id,root_hash,tree_height,
         record_count,next_page_id,tree_order FROM mva_working_view_state
-        WHERE rid=? AND view=?`,
+        WHERE rid=? AND view_kind=?`,
 		[]any{rid, view}, func(rows Rows) error {
 			return rows.Scan(&r.Epoch, &r.RootPageID, &root, &r.TreeHeight,
 				&r.RecordCount, &r.NextPageID, &r.TreeOrder)
@@ -111,7 +111,7 @@ func (s *Store) PutViewState(ctx context.Context, r ViewState) error {
 		return fmt.Errorf("cassandra: invalid finalized MVA view state")
 	}
 	return s.exec(ctx, `INSERT INTO mva_region_view_state_by_epoch
-        (rid,view,epoch,root_page_id,root_hash,tree_height,
+        (rid,view_kind,epoch,root_page_id,root_hash,tree_height,
          record_count,next_page_id,tree_order) VALUES (?,?,?,?,?,?,?,?,?)`,
 		r.RegionID, r.View, r.Epoch, r.RootPageID, r.RootHash[:],
 		r.TreeHeight, r.RecordCount, r.NextPageID, r.TreeOrder)
@@ -129,7 +129,7 @@ func (s *Store) GetViewStateAt(ctx context.Context, rid, view string, epoch uint
 	var root []byte
 	err = s.one(ctx, `SELECT epoch,root_page_id,root_hash,tree_height,
         record_count,next_page_id,tree_order FROM mva_region_view_state_by_epoch
-        WHERE rid=? AND view=? AND epoch<=? LIMIT 1`,
+        WHERE rid=? AND view_kind=? AND epoch<=? LIMIT 1`,
 		[]any{rid, view, e}, func(rows Rows) error {
 			return rows.Scan(&r.Epoch, &r.RootPageID, &root, &r.TreeHeight,
 				&r.RecordCount, &r.NextPageID, &r.TreeOrder)

@@ -120,7 +120,7 @@ func (r *proofRepo) GetCiphertexts(_ context.Context, region string, ids []uuid.
 	for _, id := range ids {
 		for _, log := range r.logs {
 			if log.LogID == id && log.Address.RegionID == region {
-				out = append(out, cloudprovider.Ciphertext{LogID: log.LogID, Ciphertext: slices.Clone(log.Ciphertext), Nonce: slices.Clone(log.Nonce), Tag: slices.Clone(log.Tag), AD: slices.Clone(log.AD)})
+				out = append(out, cloudprovider.Ciphertext{LogID: log.LogID, Ciphertext: slices.Clone(log.Ciphertext), Nonce: slices.Clone(log.Nonce), Tag: slices.Clone(log.Tag), AD: slices.Clone(log.AD), Version: cloudprovider.EncryptionVersionAESGCM})
 				break
 			}
 		}
@@ -302,7 +302,7 @@ func newFixture(t *testing.T) fixture {
 			}
 			record := SelectedRecord{LogID: id, Descriptor: desc, Address: addr, Locator: locator}
 			records = append(records, record)
-			repo.logs[addr] = EncryptedRecord{SelectedRecord: record, Ciphertext: cipher, Nonce: nonce, Tag: tag, AD: ad, Digest: digest, HMFLeaf: leafHash}
+			repo.logs[addr] = EncryptedRecord{SelectedRecord: record, Ciphertext: cipher, Nonce: nonce, Tag: tag, AD: ad, Version: cloudprovider.EncryptionVersionAESGCM, Digest: digest, HMFLeaf: leafHash}
 		}
 		nodes, err := seg.Seal()
 		if err != nil {

@@ -12,6 +12,7 @@ import (
 	"time"
 	"uuid"
 
+	"github.com/SirojWongpitakroj/mva-phv/internal/cloudprovider"
 	"github.com/SirojWongpitakroj/mva-phv/internal/domain"
 	"github.com/SirojWongpitakroj/mva-phv/internal/hmf"
 	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
@@ -47,6 +48,9 @@ func recordHash(selected SelectedRecord, log EncryptedRecord) ([32]byte, []Failu
 	}
 	if !sameSelected(selected, log.SelectedRecord) {
 		issue("returned log identity, descriptor, address, or locator differs from MVA")
+	}
+	if log.Version != cloudprovider.EncryptionVersionAESGCM {
+		issue("unsupported or missing ciphertext encryption version")
 	}
 	descriptor := selected.Descriptor
 	if selected.DescriptorFromLog {

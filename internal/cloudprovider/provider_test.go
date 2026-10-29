@@ -9,7 +9,7 @@ import (
 )
 
 func sample(id byte) Ciphertext {
-	return Ciphertext{LogID: uuid.UUID{id}, Ciphertext: []byte{id + 10}, Nonce: make([]byte, 12), Tag: make([]byte, 16), AD: []byte{1}}
+	return Ciphertext{LogID: uuid.UUID{id}, Ciphertext: []byte{id + 10}, Nonce: make([]byte, 12), Tag: make([]byte, 16), AD: []byte{1}, Version: EncryptionVersionAESGCM}
 }
 
 func TestMemoryStoresOnlyRequestedLogIDs(t *testing.T) {
@@ -73,5 +73,10 @@ func TestMemoryRejectsMalformedMetadata(t *testing.T) {
 	value.Nonce = nil
 	if err := NewMemory().StoreCiphertext(context.Background(), "R", value); err == nil {
 		t.Fatal("accepted missing nonce")
+	}
+	value = sample(5)
+	value.Version = 2
+	if err := NewMemory().StoreCiphertext(context.Background(), "R", value); !errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatalf("unsupported version accepted: %v", err)
 	}
 }
