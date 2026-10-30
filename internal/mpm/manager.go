@@ -80,6 +80,26 @@ func New(options Options) (*Manager, error) {
 	if options.IDs == nil {
 		options.IDs = randomIDs{}
 	}
+	if len(options.Regions) == 0 {
+		return nil, fmt.Errorf("new MPM: at least one region is required")
+	}
+	seenRegions := make(map[string]struct{}, len(options.Regions))
+	for _, region := range options.Regions {
+		if region == "" {
+			return nil, fmt.Errorf("new MPM: empty region ID")
+		}
+		if _, exists := seenRegions[region]; exists {
+			return nil, fmt.Errorf("new MPM: duplicate region ID %q", region)
+		}
+		seenRegions[region] = struct{}{}
+	}
+	options.Regions = slices.Clone(options.Regions)
+	if options.SiteRegions == nil {
+		if len(options.Regions) > 1 {
+			return nil, fmt.Errorf("new MPM: multi-region assignment requires a site-region store")
+		}
+		options.SiteRegions = NewMemorySiteRegions()
+	}
 	return &Manager{opts: options, shardLocks: make(map[merkle.TreeID]*sync.Mutex),
 		seenIDs: make(map[uuid.UUID]struct{}), records: make(map[merkle.TreeID][]Record),
 		persisted: make(map[merkle.TreeID]struct{}), finalizedEpoch: options.InitialEpoch,
@@ -116,12 +136,22 @@ func (m *Manager) Ingest(ctx context.Context, input Input, now time.Time) (Recei
 	if err := ctx.Err(); err != nil {
 		return Receipt{}, err
 	}
-	if input.RegionID == "" || input.SiteID == "" || input.DeviceID == "" || input.Type == "" || input.TS.IsZero() {
-		return Receipt{}, fmt.Errorf("ingest MPM: region, site, device, type, and timestamp are required")
+	if input.SiteID == "" || input.DeviceID == "" || input.Type == "" || input.TS.IsZero() {
+		return Receipt{}, fmt.Errorf("ingest MPM: site, device, type, and timestamp are required")
 	}
 	if err := m.workingError(); err != nil {
 		return Receipt{}, err
 	}
+	sourceSite, canonicalSite := siteIdentity(input.Dataset, input.SiteID)
+	region, err := m.opts.SiteRegions.Assign(ctx, siteKey(input.Dataset, sourceSite), m.opts.Regions)
+	if err != nil {
+		return Receipt{}, fmt.Errorf("ingest MPM: select region: %w", err)
+	}
+	if input.RegionID != "" && input.RegionID != region {
+		return Receipt{}, fmt.Errorf("ingest MPM: supplied region %q conflicts with site assignment %q", input.RegionID, region)
+	}
+	input.RegionID = region
+	input.SiteID = canonicalSite
 	sid, err := m.opts.HMF.SelectShard(input.RegionID, input.SiteID, input.DeviceID)
 	if err != nil {
 		return Receipt{}, fmt.Errorf("ingest MPM: select shard: %w", err)

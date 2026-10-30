@@ -14,7 +14,8 @@ import (
 // Input is a plaintext record accepted by the manager. Encryption follows
 // LogID assignment so the ciphertext's associated data can bind that ID.
 type Input struct {
-	RegionID  string
+	Dataset   string // Namespaces SiteID; empty uses the legacy shared namespace.
+	RegionID  string // Optional caller hint; MPM selects and validates the actual region.
 	SiteID    string
 	DeviceID  string
 	Type      string
@@ -190,6 +191,8 @@ type IDGenerator interface {
 }
 
 type Options struct {
+	Regions     []string // Configured region IDs in round-robin order.
+	SiteRegions SiteRegionStore
 	HMF         HMF
 	MVA         MVA
 	HPBF        HPBF

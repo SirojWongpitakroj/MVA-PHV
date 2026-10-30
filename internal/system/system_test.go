@@ -8,6 +8,7 @@ import (
 	"uuid"
 
 	"github.com/SirojWongpitakroj/mva-phv/internal/cloudprovider"
+	"github.com/SirojWongpitakroj/mva-phv/internal/domain"
 	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
 	"github.com/SirojWongpitakroj/mva-phv/internal/mpm"
 	"github.com/SirojWongpitakroj/mva-phv/internal/mva"
@@ -32,7 +33,9 @@ func TestNewWithStorageUsesDistinctPersistenceBoundaries(t *testing.T) {
 	}
 	cp := cloudprovider.NewMemory()
 	checkpoints := NewMemoryCheckpoints()
-	s, err := NewWithStorage(testConfig(), cp, cls, checkpoints)
+	config := testConfig()
+	config.SiteRegions = mpm.NewMemorySiteRegions() // Injected stand-in for a durable mapping store.
+	s, err := NewWithStorage(config, cp, cls, checkpoints)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,6 +50,82 @@ func TestNewWithStorageUsesDistinctPersistenceBoundaries(t *testing.T) {
 	}
 	if _, ok := s.auditor.Resolver.(phv.HistoricalMVAResolver); !ok {
 		t.Fatal("persistent audits did not read finalized MVA evidence")
+	}
+}
+
+func TestPersistentMultiRegionRequiresMappingStore(t *testing.T) {
+	cls, err := cassandra.NewStore(connectTestCQL{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewWithStorage(testConfig(), cloudprovider.NewMemory(), cls, NewMemoryCheckpoints()); err == nil {
+		t.Fatal("persistent multi-region deployment silently used a volatile site mapping")
+	}
+}
+
+func TestSingleRegionAssignsSiteWithoutCallerRegion(t *testing.T) {
+	config := testConfig()
+	config.NumRegions = 1
+	s, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := mpm.Input{Dataset: "WADI", SiteID: "P1", DeviceID: "sensor", Type: "reading",
+		TS: time.Unix(123, 0), Plaintext: []byte("1.5")}
+	for i := 0; i < 2; i++ {
+		receipt, err := s.Ingest(context.Background(), value, value.TS.Add(time.Duration(i)*time.Second))
+		if err != nil || receipt.Address.RegionID != "0" {
+			t.Fatalf("single-region assignment %d: %+v, %v", i, receipt, err)
+		}
+	}
+}
+
+func TestSameSourceSiteAcrossDatasetsStaysDistinctInAuditAndAEAD(t *testing.T) {
+	config := testConfig()
+	config.NumRegions = 1
+	config.MaxSegmentSize = 1
+	s, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for i, dataset := range []string{"WADI", "HAI", "SWAT"} {
+		site := dataset + ":P1"
+		inputSite := "P1"
+		if i == 1 {
+			inputSite = site // Canonicalizer output must not be prefixed twice.
+		}
+		input := mpm.Input{Dataset: dataset, SiteID: inputSite, DeviceID: "FIT01",
+			Type: "FIT", TS: time.Unix(int64(i+1), 0).UTC(), Plaintext: []byte(dataset)}
+		receipt, err := s.Ingest(ctx, input, input.TS)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ciphertexts, err := s.ciphertexts.GetCiphertexts(ctx, receipt.Address.RegionID, []uuid.UUID{receipt.LogID})
+		if err != nil || len(ciphertexts) != 1 {
+			t.Fatalf("CP retrieval for %s: %v", dataset, err)
+		}
+		var tag, region, adSite, device, typ string
+		var id uuid.UUID
+		var ts time.Time
+		if err := domain.Deserialize(ciphertexts[0].AD, &tag, &id, &region, &adSite, &device, &typ, &ts); err != nil ||
+			tag != "MVA-PHV:LOG:V1" || id != receipt.LogID || adSite != site {
+			t.Fatalf("AEAD did not bind distinct site %s: %s, %v", site, adSite, err)
+		}
+	}
+	if _, err := s.PrepareFinalization(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitFinalization(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, dataset := range []string{"WADI", "HAI", "SWAT"} {
+		site := dataset + ":P1"
+		result, err := s.Audit(ctx, phv.Request{Epoch: 1, Query: mva.SiteQuery{SiteID: site}, UsePruning: true})
+		if err != nil || !result.Verified || len(result.Proof.Selected) != 1 ||
+			result.Proof.Selected[0].Descriptor.SiteID != site {
+			t.Fatalf("audit for %s selected wrong dataset site: %v", site, err)
+		}
 	}
 }
 
@@ -195,7 +274,11 @@ func TestFirstIngestionFinalizationAndAuditThroughSystem(t *testing.T) {
 	ctx := context.Background()
 	now := time.Unix(1000, 0).UTC()
 	input := func(region string, i int) mpm.Input {
-		return mpm.Input{RegionID: region, SiteID: "site", DeviceID: "device",
+		site := "site"
+		if region == "1" {
+			site = "other-site"
+		}
+		return mpm.Input{Dataset: "TEST", RegionID: region, SiteID: site, DeviceID: "device",
 			Type: "alarm", TS: now.Add(time.Duration(i) * time.Second), Plaintext: []byte{byte(i)}}
 	}
 	first, err := s.Ingest(ctx, input("0", 1), now)
@@ -212,7 +295,7 @@ func TestFirstIngestionFinalizationAndAuditThroughSystem(t *testing.T) {
 	if len(s.manager.PendingSegments()) != 1 || len(s.evidence.segments) != 1 || len(s.evidence.segmentNode) < 2 {
 		t.Fatal("sealed Segment proof nodes were not retained in memory")
 	}
-	query := mva.AttrRangeQuery{SiteID: "site", DevID: "device", Type: "alarm",
+	query := mva.AttrRangeQuery{SiteID: "TEST:site", DevID: "device", Type: "alarm",
 		StartTS: now.Add(time.Second), EndTS: now.Add(2 * time.Second)}
 	request := phv.Request{Epoch: 1, Query: query, UsePruning: true}
 	if _, err := s.Audit(ctx, request); err == nil {
@@ -266,8 +349,8 @@ func TestFirstIngestionFinalizationAndAuditThroughSystem(t *testing.T) {
 	if _, err := s.CommitFinalization(ctx, 2); err != nil {
 		t.Fatal(err)
 	}
-	all, err := s.Audit(ctx, phv.Request{Epoch: 2, Query: mva.SiteQuery{SiteID: "site"}, UsePruning: true})
-	if err != nil || !all.Verified || len(all.Proof.Selected) != 4 {
+	all, err := s.Audit(ctx, phv.Request{Epoch: 2, Query: mva.SiteQuery{SiteID: "TEST:site"}, UsePruning: true})
+	if err != nil || !all.Verified || len(all.Proof.Selected) != 2 {
 		t.Fatalf("cross-Region audit=%+v err=%v", all.Metrics, err)
 	}
 	if _, err := s.Audit(ctx, request); err == nil {

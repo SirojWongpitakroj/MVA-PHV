@@ -131,7 +131,7 @@ func TestConcreteMPMAdaptersIngestPrepareAndCommit(t *testing.T) {
 	}
 	checkpoints := &memoryCheckpoints{values: make(map[uint64][32]byte), fail: true}
 	provider := cloudprovider.NewMemory()
-	manager, err := mpm.NewMPM(mpm.Options{HMF: &mpm.HMFAdapter{Tree: h}, MVA: &mpm.MVAAdapter{Tree: v},
+	manager, err := mpm.NewMPM(mpm.Options{Regions: []string{"0"}, HMF: &mpm.HMFAdapter{Tree: h}, MVA: &mpm.MVAAdapter{Tree: v},
 		HPBF: &mpm.HPBFAdapter{Tree: p}, Encryptor: encryptor, Locator: mpm.CanonicalLocator{},
 		Evidence: repo, Ciphertexts: provider, Checkpoints: checkpoints})
 	if err != nil {

@@ -385,14 +385,14 @@ func newRig(t *testing.T, max int64) *rig {
 	t.Helper()
 	r := &rig{h: newTestHMF(max, time.Hour), v: &testMVA{}, b: &testHPBF{}, e: &testEvidence{}, c: &testCheckpoints{roots: map[uint64][32]byte{}}}
 	var err error
-	r.manager, err = New(Options{Ciphertexts: cloudprovider.NewMemory(), HMF: r.h, MVA: r.v, HPBF: r.b, Encryptor: testEncrypt{}, Locator: testLocator{}, Evidence: r.e, Checkpoints: r.c, IDs: &testIDs{}})
+	r.manager, err = New(Options{Regions: []string{"r0", "r1"}, SiteRegions: NewMemorySiteRegions(), Ciphertexts: cloudprovider.NewMemory(), HMF: r.h, MVA: r.v, HPBF: r.b, Encryptor: testEncrypt{}, Locator: testLocator{}, Evidence: r.e, Checkpoints: r.c, IDs: &testIDs{}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return r
 }
 func input(device string) Input {
-	return Input{RegionID: "r0", SiteID: "site", DeviceID: device, Type: "alarm", TS: time.Unix(100, 0), Plaintext: []byte(device)}
+	return Input{Dataset: "TEST", RegionID: "r0", SiteID: "site", DeviceID: device, Type: "alarm", TS: time.Unix(100, 0), Plaintext: []byte(device)}
 }
 
 func TestCPFailurePreventsCLSAcceptanceAndFinalization(t *testing.T) {
@@ -432,7 +432,7 @@ func TestIngestBindsSameAddressAcrossStructures(t *testing.T) {
 	if len(r.v.received) != 2 || len(r.b.received) != 2 || len(r.e.accepted) != 2 || r.v.received[0].Address != a.Address || r.h.inserted[0].Address != a.Address {
 		t.Fatal("structures received different records or addresses")
 	}
-	if r.b.received[0] != (tokenCall{"r0", a.Address.ShardID, "site", "a", "alarm"}) {
+	if r.b.received[0] != (tokenCall{"r0", a.Address.ShardID, "TEST:site", "a", "alarm"}) {
 		t.Fatalf("wrong HPBF token inputs: %+v", r.b.received[0])
 	}
 	want, err := (testLocator{}).CommitLocator(a.LogID, r.v.received[0].Descriptor, a.Address)
@@ -448,6 +448,7 @@ func TestIngestBindsSameAddressAcrossStructures(t *testing.T) {
 	}
 	other := input("a")
 	other.RegionID = "r1"
+	other.SiteID = "other-site"
 	regionReceipt, err := r.manager.Ingest(ctx, other, now)
 	if err != nil || regionReceipt.Address.RegionID != "r1" {
 		t.Fatalf("region-scoped placement failed: %v", err)
@@ -737,7 +738,7 @@ func TestConcreteAdaptersCoordinateSealedCandidates(t *testing.T) {
 	}
 	evidence := &testEvidence{}
 	checkpoints := &testCheckpoints{roots: map[uint64][32]byte{}}
-	manager, err := New(Options{Ciphertexts: cloudprovider.NewMemory(), HMF: &HMFAdapter{Tree: h}, MVA: &MVAAdapter{Tree: v},
+	manager, err := New(Options{Regions: []string{"0"}, Ciphertexts: cloudprovider.NewMemory(), HMF: &HMFAdapter{Tree: h}, MVA: &MVAAdapter{Tree: v},
 		HPBF: &HPBFAdapter{Tree: b}, Encryptor: testEncrypt{}, Locator: CanonicalLocator{},
 		Evidence: evidence, Checkpoints: checkpoints, IDs: &testIDs{}})
 	if err != nil {

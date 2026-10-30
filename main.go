@@ -16,9 +16,9 @@ import (
 	"strings"
 	"time"
 
+	checkpointpostgresql "github.com/SirojWongpitakroj/mva-phv/internal/checkpoint"
 	cppostgresql "github.com/SirojWongpitakroj/mva-phv/internal/cloudprovider/postgresql"
 	"github.com/SirojWongpitakroj/mva-phv/internal/storage/cassandra"
-	checkpointpostgresql "github.com/SirojWongpitakroj/mva-phv/internal/storage/postgresql"
 	"github.com/SirojWongpitakroj/mva-phv/internal/system"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )

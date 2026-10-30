@@ -20,6 +20,7 @@ import (
 // NumRegions-1, matching the current MVA and HPBF constructors.
 type Config struct {
 	NumRegions      int
+	SiteRegions     mpm.SiteRegionStore // Required for durable multi-region deployments.
 	ShardsPerRegion int
 	MaxSegmentSize  int
 	SealInterval    time.Duration
@@ -65,6 +66,9 @@ func NewWithProvider(config Config, ciphertexts cloudprovider.Provider) (*System
 func NewWithStorage(config Config, ciphertexts cloudprovider.Provider, cls *cassandra.Store, checkpoints mpm.CheckpointStore) (*System, error) {
 	if cls == nil || checkpoints == nil {
 		return nil, fmt.Errorf("new system: CLS and checkpoint store are required")
+	}
+	if config.NumRegions > 1 && config.SiteRegions == nil {
+		return nil, fmt.Errorf("new system: persistent multi-region deployment requires a durable site-region store")
 	}
 	return newSystem(config, ciphertexts, cls, checkpoints)
 }
@@ -120,7 +124,16 @@ func newSystem(config Config, ciphertexts cloudprovider.Provider, cls *cassandra
 		pruner = phv.HistoricalHPBFPruner{Source: cls}
 		resolver = phv.HistoricalMVAResolver{Reader: cls}
 	}
+	regions := make([]string, config.NumRegions)
+	for i := range regions {
+		regions[i] = strconv.Itoa(i)
+	}
+	siteRegions := config.SiteRegions
+	if siteRegions == nil && cls == nil {
+		siteRegions = mpm.NewMemorySiteRegions()
+	}
 	manager, err := mpm.New(mpm.Options{
+		Regions: regions, SiteRegions: siteRegions,
 		HMF: &mpm.HMFAdapter{Tree: h}, MVA: &mpm.MVAAdapter{Tree: m},
 		HPBF: &mpm.HPBFAdapter{Tree: p}, Encryptor: encryptor,
 		Locator: mpm.CanonicalLocator{}, Evidence: evidence, Ciphertexts: ciphertexts, Checkpoints: checkpoints,
@@ -130,10 +143,6 @@ func newSystem(config Config, ciphertexts cloudprovider.Provider, cls *cassandra
 	}
 	if roots == nil {
 		roots = phv.CurrentRoots{Manager: manager, Checkpoints: checkpoints}
-	}
-	regions := make([]string, config.NumRegions)
-	for i := range regions {
-		regions[i] = strconv.Itoa(i)
 	}
 	auditor := &phv.Auditor{
 		Roots:  roots,
