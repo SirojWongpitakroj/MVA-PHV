@@ -164,6 +164,9 @@ func (mva *MVA) Resolve(query LocatorQuery, candidateRegions []merkle.TreeID) ([
 	if query == nil {
 		return nil, nil, fmt.Errorf("resolve MVA: query is nil")
 	}
+	if _, batch := query.(LogIDBatchQuery); batch {
+		return nil, nil, fmt.Errorf("resolve MVA: use ResolveLogIDBatch for a non-contiguous LogID set")
+	}
 	mva.mu.RLock()
 	defer mva.mu.RUnlock()
 	finalized := mva.Finalized

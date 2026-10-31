@@ -151,6 +151,12 @@ func (h *testHMF) Reserve(rid, site, dev string, now time.Time) (Reservation, er
 	if err != nil {
 		return nil, err
 	}
+	return h.ReserveShard(rid, sid, now)
+}
+func (h *testHMF) ReserveShard(rid string, sid int64, now time.Time) (Reservation, error) {
+	if rid != "r0" && rid != "r1" || sid < 0 || sid >= 4 {
+		return nil, errors.New("unknown Shard")
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	key := merkle.TreeID{Type: merkle.TreeShard, RegionID: rid, ShardID: sid}
@@ -385,7 +391,7 @@ func newRig(t *testing.T, max int64) *rig {
 	t.Helper()
 	r := &rig{h: newTestHMF(max, time.Hour), v: &testMVA{}, b: &testHPBF{}, e: &testEvidence{}, c: &testCheckpoints{roots: map[uint64][32]byte{}}}
 	var err error
-	r.manager, err = New(Options{Regions: []string{"r0", "r1"}, SiteRegions: NewMemorySiteRegions(), Ciphertexts: cloudprovider.NewMemory(), HMF: r.h, MVA: r.v, HPBF: r.b, Encryptor: testEncrypt{}, Locator: testLocator{}, Evidence: r.e, Checkpoints: r.c, IDs: &testIDs{}})
+	r.manager, err = New(Options{Regions: []string{"r0", "r1"}, SiteRegions: NewMemorySiteRegions(), ShardsPerRegion: 4, DeviceShards: NewMemoryDeviceShards(), Ciphertexts: cloudprovider.NewMemory(), HMF: r.h, MVA: r.v, HPBF: r.b, Encryptor: testEncrypt{}, Locator: testLocator{}, Evidence: r.e, Checkpoints: r.c, IDs: &testIDs{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,19 +458,6 @@ func TestIngestBindsSameAddressAcrossStructures(t *testing.T) {
 	regionReceipt, err := r.manager.Ingest(ctx, other, now)
 	if err != nil || regionReceipt.Address.RegionID != "r1" {
 		t.Fatalf("region-scoped placement failed: %v", err)
-	}
-	for i := 0; i < 30; i++ {
-		sid, err := r.h.SelectShard("r0", "site", fmt.Sprint(i))
-		if err != nil {
-			t.Fatal(err)
-		}
-		again, _ := r.h.SelectShard("r0", "site", fmt.Sprint(i))
-		if sid != again {
-			t.Fatal("unstable placement")
-		}
-	}
-	if _, err := r.h.SelectShard("missing", "site", "a"); err == nil {
-		t.Fatal("unknown region accepted")
 	}
 }
 
@@ -738,7 +731,7 @@ func TestConcreteAdaptersCoordinateSealedCandidates(t *testing.T) {
 	}
 	evidence := &testEvidence{}
 	checkpoints := &testCheckpoints{roots: map[uint64][32]byte{}}
-	manager, err := New(Options{Regions: []string{"0"}, Ciphertexts: cloudprovider.NewMemory(), HMF: &HMFAdapter{Tree: h}, MVA: &MVAAdapter{Tree: v},
+	manager, err := New(Options{Regions: []string{"0"}, ShardsPerRegion: 2, Ciphertexts: cloudprovider.NewMemory(), HMF: &HMFAdapter{Tree: h}, MVA: &MVAAdapter{Tree: v},
 		HPBF: &HPBFAdapter{Tree: b}, Encryptor: testEncrypt{}, Locator: CanonicalLocator{},
 		Evidence: evidence, Checkpoints: checkpoints, IDs: &testIDs{}})
 	if err != nil {
@@ -870,8 +863,8 @@ func (unavailableCommitReservation) Commit([32]byte, time.Time) error {
 
 type unavailableCommitHMF struct{ *testHMF }
 
-func (h *unavailableCommitHMF) Reserve(rid, site, device string, now time.Time) (Reservation, error) {
-	r, err := h.testHMF.Reserve(rid, site, device, now)
+func (h *unavailableCommitHMF) ReserveShard(rid string, sid int64, now time.Time) (Reservation, error) {
+	r, err := h.testHMF.ReserveShard(rid, sid, now)
 	if err != nil {
 		return nil, err
 	}

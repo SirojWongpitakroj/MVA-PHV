@@ -43,9 +43,8 @@ func TestIndustrialLogIngestionBindsCPMVAHPBFAndHMF(t *testing.T) {
 		receipt.Address.SegmentID != 0 || receipt.Address.LeafID != 0 {
 		t.Fatalf("invalid identity/address: %+v", receipt)
 	}
-	wantShard, err := s.evidence.hmf.SelectShard(input.RegionID, input.SiteID, input.DeviceID)
-	if err != nil || receipt.Address.ShardID != wantShard {
-		t.Fatalf("wrong deterministic shard: %+v, %v", receipt.Address, err)
+	if receipt.Address.ShardID != 0 {
+		t.Fatalf("first device should receive round-robin Shard 0: %+v", receipt.Address)
 	}
 
 	// CP can retrieve by LogID alone. It does not receive the HMF address or any proof state.
@@ -97,14 +96,14 @@ func TestIndustrialLogIngestionBindsCPMVAHPBFAndHMF(t *testing.T) {
 		t.Fatal("HMF commitment does not bind CP ciphertext")
 	}
 	segment := merkle.TreeID{Type: merkle.TreeSegment, RegionID: receipt.Address.RegionID, ShardID: receipt.Address.ShardID, SegmentID: receipt.Address.SegmentID}
-	storedLeaf, ok := s.evidence.segmentNode[phv.NodeKey{Tree: segment, Level: 0, Index: receipt.Address.LeafID}]
-	if !ok || storedLeaf.Hash != leaf || len(s.evidence.segments) != 1 {
+	storedLeaf, ok := memoryEvidence(s).segmentNode[phv.NodeKey{Tree: segment, Level: 0, Index: receipt.Address.LeafID}]
+	if !ok || storedLeaf.Hash != leaf || len(memoryEvidence(s).segments) != 1 {
 		t.Fatal("CLS sealed evidence has a different HMF leaf or Segment")
 	}
-	if s.evidence.logIDs[receipt.LogID] != receipt.Address {
+	if memoryEvidence(s).logIDs[receipt.LogID] != receipt.Address {
 		t.Fatal("CLS address metadata differs from CP LogID and HMF placement")
 	}
-	if len(s.evidence.addresses) != 1 || len(s.manager.PendingSegments()) != 1 {
+	if len(memoryEvidence(s).addresses) != 1 || len(s.manager.PendingSegments()) != 1 {
 		t.Fatal("ingestion did not create one pending authenticated Segment")
 	}
 
@@ -152,7 +151,7 @@ func TestIndustrialLogIngestionBindsCPMVAHPBFAndHMF(t *testing.T) {
 		t.Fatalf("detached proof failed: %+v, %v", verified, err)
 	}
 	// The reference HMF implementation still owns its hashing rules.
-	if root, err := hmf.RootHash(segment, 1, leaf); err != nil || root != s.evidence.segments[segment].Root {
+	if root, err := hmf.RootHash(segment, 1, leaf); err != nil || root != memoryEvidence(s).segments[segment].Root {
 		t.Fatalf("sealed Segment root mismatch: %v", err)
 	}
 }

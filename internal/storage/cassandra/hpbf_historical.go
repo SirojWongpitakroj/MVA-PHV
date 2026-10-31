@@ -17,6 +17,16 @@ func historicalLevels(leaves [][32]byte, rows []EpochNode) ([][][32]byte, error)
 		return nil, fmt.Errorf("cassandra HPBF: missing leaves")
 	}
 	levels := [][][32]byte{leaves}
+	// Epochs written before the level fix numbered internal levels from zero.
+	// Normalize that one legacy layout; verification still recomputes every
+	// internal hash against the finalized HPBF root.
+	legacyZeroBased := false
+	for _, row := range rows {
+		if row.Level == 0 {
+			legacyZeroBased = true
+			break
+		}
+	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Level != rows[j].Level {
 			return rows[i].Level < rows[j].Level
@@ -24,16 +34,20 @@ func historicalLevels(leaves [][32]byte, rows []EpochNode) ([][][32]byte, error)
 		return rows[i].Index < rows[j].Index
 	})
 	for _, row := range rows {
-		if row.Level <= 0 || row.Level > 64 || row.Index < 0 {
+		level := row.Level
+		if legacyZeroBased {
+			level++
+		}
+		if level <= 0 || level > 64 || row.Index < 0 {
 			return nil, fmt.Errorf("cassandra HPBF: invalid node position")
 		}
-		for len(levels) <= int(row.Level) {
+		for len(levels) <= int(level) {
 			levels = append(levels, nil)
 		}
-		if int64(len(levels[row.Level])) != row.Index {
+		if int64(len(levels[level])) != row.Index {
 			return nil, fmt.Errorf("cassandra HPBF: missing or duplicate internal node")
 		}
-		levels[row.Level] = append(levels[row.Level], row.Hash)
+		levels[level] = append(levels[level], row.Hash)
 	}
 	return levels, nil
 }

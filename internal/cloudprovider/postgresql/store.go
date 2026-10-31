@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	_ "embed"
 	"errors"
 	"fmt"
 	"strings"
@@ -16,6 +17,9 @@ import (
 // CP database, never the trusted checkpoint or internal CLS database.
 type Store struct{ db *sql.DB }
 
+//go:embed schema.sql
+var schemaSQL string
+
 var _ cloudprovider.Provider = (*Store)(nil)
 
 func New(db *sql.DB) (*Store, error) {
@@ -23,6 +27,15 @@ func New(db *sql.DB) (*Store, error) {
 		return nil, fmt.Errorf("PostgreSQL CP: DB is nil")
 	}
 	return &Store{db: db}, nil
+}
+
+// EnsureSchema prepares the external CP table before a fresh experiment.
+func (s *Store) EnsureSchema(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("PostgreSQL CP: DB is nil")
+	}
+	_, err := s.db.ExecContext(ctx, schemaSQL)
+	return err
 }
 
 func (s *Store) StoreCiphertext(ctx context.Context, region string, value cloudprovider.Ciphertext) error {

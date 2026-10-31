@@ -1,12 +1,17 @@
 package system
 
 import (
+	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 	"uuid"
 
+	"github.com/SirojWongpitakroj/mva-phv/internal/canonicalize"
 	"github.com/SirojWongpitakroj/mva-phv/internal/cloudprovider"
 	"github.com/SirojWongpitakroj/mva-phv/internal/domain"
 	"github.com/SirojWongpitakroj/mva-phv/internal/merkle"
@@ -35,12 +40,16 @@ func TestNewWithStorageUsesDistinctPersistenceBoundaries(t *testing.T) {
 	checkpoints := NewMemoryCheckpoints()
 	config := testConfig()
 	config.SiteRegions = mpm.NewMemorySiteRegions() // Injected stand-in for a durable mapping store.
+	config.DeviceShards = mpm.NewMemoryDeviceShards()
 	s, err := NewWithStorage(config, cp, cls, checkpoints)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.ciphertexts != cp || s.auditor.Repository != cls || s.trusted != checkpoints || s.evidence != nil {
+	if s.ciphertexts != cp || s.auditor.Repository != cls || s.trusted != checkpoints {
 		t.Fatal("persistent system reused a memory evidence store or changed an injected dependency")
+	}
+	if _, ok := s.evidence.(*cassandra.MPMRepository); !ok {
+		t.Fatal("persistent MPM did not use Cassandra evidence writes")
 	}
 	if _, ok := s.auditor.Roots.(phv.CheckpointRoots); !ok {
 		t.Fatal("persistent audits did not authenticate CLS roots against the checkpoint store")
@@ -61,6 +70,11 @@ func TestPersistentMultiRegionRequiresMappingStore(t *testing.T) {
 	if _, err := NewWithStorage(testConfig(), cloudprovider.NewMemory(), cls, NewMemoryCheckpoints()); err == nil {
 		t.Fatal("persistent multi-region deployment silently used a volatile site mapping")
 	}
+	config := testConfig()
+	config.SiteRegions = mpm.NewMemorySiteRegions()
+	if _, err := NewWithStorage(config, cloudprovider.NewMemory(), cls, NewMemoryCheckpoints()); err == nil {
+		t.Fatal("persistent multi-Shard deployment silently used a volatile device mapping")
+	}
 }
 
 func TestSingleRegionAssignsSiteWithoutCallerRegion(t *testing.T) {
@@ -77,6 +91,42 @@ func TestSingleRegionAssignsSiteWithoutCallerRegion(t *testing.T) {
 		if err != nil || receipt.Address.RegionID != "0" {
 			t.Fatalf("single-region assignment %d: %+v, %v", i, receipt, err)
 		}
+	}
+}
+
+func TestIngestCanonicalPreservesValueAndLabelInEncryptedPayload(t *testing.T) {
+	config := testConfig()
+	config.NumRegions, config.ShardsPerRegion = 4, 16
+	s, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := canonicalize.CanonicalRecord{Dataset: "WADI", Site: "WADI:P1", Device: "FIT_001",
+		Type: "FIT_PV", Timestamp: time.Unix(200, 0).UTC(), Value: "0.240392", Label: "attack"}
+	receipt, err := s.IngestCanonical(context.Background(), event, event.Timestamp)
+	if err != nil || receipt.Address.RegionID != "0" || receipt.Address.ShardID != 0 {
+		t.Fatalf("canonical placement: %+v, %v", receipt, err)
+	}
+	logs, err := s.ciphertexts.GetCiphertexts(context.Background(), "0", []uuid.UUID{receipt.LogID})
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("CP lookup: %v", err)
+	}
+	block, err := aes.NewCipher(config.EncryptionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed := append(append([]byte(nil), logs[0].Ciphertext...), logs[0].Tag...)
+	plaintext, err := aead.Open(nil, logs[0].Nonce, sealed, logs[0].AD)
+	if err != nil || bytes.Equal(plaintext, logs[0].Ciphertext) {
+		t.Fatalf("canonical payload not encrypted correctly: %v", err)
+	}
+	var decoded canonicalize.CanonicalRecord
+	if err := json.Unmarshal(plaintext, &decoded); err != nil || decoded != event {
+		t.Fatalf("canonical payload changed: %+v, %v", decoded, err)
 	}
 }
 
@@ -222,9 +272,9 @@ func TestCheckpointOutageStopsAuditBeforeCPRead(t *testing.T) {
 	}
 	spy := &countingCiphertextReader{Reader: s.ciphertexts}
 	s.auditor.Ciphertexts = spy
-	s.checkpoints.mu.Lock()
-	delete(s.checkpoints.values, 1)
-	s.checkpoints.mu.Unlock()
+	memoryCheckpoints(s).mu.Lock()
+	delete(memoryCheckpoints(s).values, 1)
+	memoryCheckpoints(s).mu.Unlock()
 	if _, err := s.Audit(ctx, phv.Request{Epoch: 1, Query: mva.LogIDQuery{ID: receipt.LogID}}); err == nil || spy.calls != 0 {
 		t.Fatalf("CP queried without trusted checkpoint: calls=%d err=%v", spy.calls, err)
 	}
@@ -253,9 +303,9 @@ func TestCLSEvidenceOutageIsNotCiphertextTampering(t *testing.T) {
 	}
 	segment := merkle.TreeID{Type: merkle.TreeSegment, RegionID: first.Address.RegionID, ShardID: first.Address.ShardID, SegmentID: first.Address.SegmentID}
 	// The second leaf is the first leaf's required frontier sibling.
-	s.evidence.mu.Lock()
-	delete(s.evidence.segmentNode, phv.NodeKey{Tree: segment, Level: 0, Index: 1})
-	s.evidence.mu.Unlock()
+	memoryEvidence(s).mu.Lock()
+	delete(memoryEvidence(s).segmentNode, phv.NodeKey{Tree: segment, Level: 0, Index: 1})
+	memoryEvidence(s).mu.Unlock()
 	result, err := s.Audit(ctx, phv.Request{Epoch: 1, Query: mva.LogIDQuery{ID: first.LogID}})
 	if !errors.Is(err, phv.ErrRepositoryFailure) || !result.Unresolved || result.Verified {
 		t.Fatalf("missing CLS frontier classified as tampering: verified=%v unresolved=%v err=%v", result.Verified, result.Unresolved, err)
@@ -292,7 +342,7 @@ func TestFirstIngestionFinalizationAndAuditThroughSystem(t *testing.T) {
 	if err != nil || second.Address.ShardID != first.Address.ShardID || second.Address.SegmentID != 0 || second.Address.LeafID != 1 {
 		t.Fatalf("second ingest=%+v err=%v", second, err)
 	}
-	if len(s.manager.PendingSegments()) != 1 || len(s.evidence.segments) != 1 || len(s.evidence.segmentNode) < 2 {
+	if len(s.manager.PendingSegments()) != 1 || len(memoryEvidence(s).segments) != 1 || len(memoryEvidence(s).segmentNode) < 2 {
 		t.Fatal("sealed Segment proof nodes were not retained in memory")
 	}
 	query := mva.AttrRangeQuery{SiteID: "TEST:site", DevID: "device", Type: "alarm",
@@ -324,10 +374,10 @@ func TestFirstIngestionFinalizationAndAuditThroughSystem(t *testing.T) {
 	if err != nil || !verified.Valid || verified.GlobalRoot != roots.HMF {
 		t.Fatalf("detached proof=%+v err=%v", verified, err)
 	}
-	if err := s.checkpoints.Commit(ctx, 1, checkpoint); err != nil {
+	if err := memoryCheckpoints(s).Commit(ctx, 1, checkpoint); err != nil {
 		t.Fatalf("identical checkpoint retry: %v", err)
 	}
-	if err := s.checkpoints.Commit(ctx, 1, [32]byte{9}); err == nil {
+	if err := memoryCheckpoints(s).Commit(ctx, 1, [32]byte{9}); err == nil {
 		t.Fatal("conflicting checkpoint replaced the finalized checkpoint")
 	}
 

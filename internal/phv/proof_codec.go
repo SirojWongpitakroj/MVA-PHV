@@ -41,7 +41,62 @@ type mvaWire struct {
 	Epoch   uint64
 	Levels  [][][32]byte
 	Regions []mvaRegionWire
+	Batch   []mvaBatchWire
 }
+type mvaBatchWire struct {
+	Target  mva.LogIDBatchTarget
+	Regions []merkle.TreeID
+	Proof   *mvaWire
+}
+
+func wireMVA(p *mva.MVAProof) (*mvaWire, error) {
+	if p == nil {
+		return nil, nil
+	}
+	w := &mvaWire{Epoch: p.Epoch, Levels: p.Levels}
+	ids := make([]string, 0, len(p.Regions))
+	for id := range p.Regions {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	for _, id := range ids {
+		if p.Regions[id] == nil {
+			return nil, fmt.Errorf("PHV: nil MVA Region proof")
+		}
+		w.Regions = append(w.Regions, mvaRegionWire{RID: id, Proof: *p.Regions[id]})
+	}
+	for _, item := range p.Batch {
+		child, err := wireMVA(item.Proof)
+		if err != nil {
+			return nil, err
+		}
+		w.Batch = append(w.Batch, mvaBatchWire{Target: item.Target, Regions: item.Regions, Proof: child})
+	}
+	return w, nil
+}
+
+func restoreMVA(w *mvaWire) (*mva.MVAProof, error) {
+	if w == nil {
+		return nil, nil
+	}
+	p := &mva.MVAProof{Epoch: w.Epoch, Levels: w.Levels, Regions: make(map[string]*mva.MVARegionProof, len(w.Regions))}
+	for _, r := range w.Regions {
+		if _, duplicate := p.Regions[r.RID]; duplicate {
+			return nil, fmt.Errorf("PHV: duplicate MVA Region proof")
+		}
+		part := r.Proof
+		p.Regions[r.RID] = &part
+	}
+	for _, item := range w.Batch {
+		child, err := restoreMVA(item.Proof)
+		if err != nil {
+			return nil, err
+		}
+		p.Batch = append(p.Batch, mva.MVABatchItem{Target: item.Target, Regions: item.Regions, Proof: child})
+	}
+	return p, nil
+}
+
 type proofWire struct {
 	Epoch                       uint64
 	Topology                    Topology
@@ -72,17 +127,10 @@ func proofToWire(p Proof) (proofWire, error) {
 		Selected: p.Selected, PrunedRegions: p.PrunedRegions, PrunedShards: p.PrunedShards,
 		Trees: p.Trees, Nodes: p.Nodes, Logs: p.Logs, Root: p.Root}
 	if p.MVA != nil {
-		w.MVA = &mvaWire{Epoch: p.MVA.Epoch, Levels: p.MVA.Levels}
-		ids := make([]string, 0, len(p.MVA.Regions))
-		for id := range p.MVA.Regions {
-			ids = append(ids, id)
-		}
-		slices.Sort(ids)
-		for _, id := range ids {
-			if p.MVA.Regions[id] == nil {
-				return proofWire{}, fmt.Errorf("PHV: nil MVA Region proof")
-			}
-			w.MVA.Regions = append(w.MVA.Regions, mvaRegionWire{RID: id, Proof: *p.MVA.Regions[id]})
+		var err error
+		w.MVA, err = wireMVA(p.MVA)
+		if err != nil {
+			return proofWire{}, err
 		}
 	}
 	if p.HPBF != nil {
@@ -113,6 +161,18 @@ func EncodeProof(p Proof) ([]byte, error) {
 }
 
 type proofByteCounter struct{ n int64 }
+
+func MVAProofSize(p *mva.MVAProof) (int64, error) {
+	w, err := wireMVA(p)
+	if err != nil {
+		return 0, err
+	}
+	var counter proofByteCounter
+	if err := gob.NewEncoder(&counter).Encode(w); err != nil {
+		return 0, err
+	}
+	return counter.n, nil
+}
 
 func (c *proofByteCounter) Write(data []byte) (int, error) {
 	c.n += int64(len(data))
@@ -150,13 +210,10 @@ func DecodeProof(data []byte) (Proof, error) {
 		Selected: w.Selected, PrunedRegions: w.PrunedRegions, PrunedShards: w.PrunedShards,
 		Trees: w.Trees, Nodes: w.Nodes, Logs: w.Logs, Root: w.Root}
 	if w.MVA != nil {
-		p.MVA = &mva.MVAProof{Epoch: w.MVA.Epoch, Levels: w.MVA.Levels, Regions: make(map[string]*mva.MVARegionProof, len(w.MVA.Regions))}
-		for _, r := range w.MVA.Regions {
-			if _, duplicate := p.MVA.Regions[r.RID]; duplicate {
-				return Proof{}, fmt.Errorf("PHV: duplicate MVA Region proof")
-			}
-			part := r.Proof
-			p.MVA.Regions[r.RID] = &part
+		var err error
+		p.MVA, err = restoreMVA(w.MVA)
+		if err != nil {
+			return Proof{}, err
 		}
 	}
 	if w.HPBF != nil {

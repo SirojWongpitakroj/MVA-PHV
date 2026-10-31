@@ -3,6 +3,7 @@ package postgresql
 import (
 	"context"
 	"database/sql"
+	_ "embed"
 	"errors"
 	"fmt"
 	"math"
@@ -17,6 +18,9 @@ var ErrCheckpointConflict = errors.New("checkpoint epoch already has a different
 // The application supplies a database/sql DB with a PostgreSQL driver.
 type MockCheckpointStore struct{ db *sql.DB }
 
+//go:embed schema.sql
+var schemaSQL string
+
 var _ mpm.CheckpointStore = (*MockCheckpointStore)(nil)
 
 func NewMockCheckpointStore(db *sql.DB) (*MockCheckpointStore, error) {
@@ -24,6 +28,15 @@ func NewMockCheckpointStore(db *sql.DB) (*MockCheckpointStore, error) {
 		return nil, fmt.Errorf("PostgreSQL checkpoint store: DB is nil")
 	}
 	return &MockCheckpointStore{db: db}, nil
+}
+
+// EnsureSchema prepares the external mock checkpoint table before a fresh experiment.
+func (s *MockCheckpointStore) EnsureSchema(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("PostgreSQL checkpoint store: DB is nil")
+	}
+	_, err := s.db.ExecContext(ctx, schemaSQL)
+	return err
 }
 
 // Commit accepts an identical retry but rejects a different hash for an epoch.

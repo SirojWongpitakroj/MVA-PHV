@@ -22,6 +22,15 @@ type CanonicalRecord struct {
 	Label     string    `json:"label"`
 }
 
+// DeviceIdentity describes one source-defined Site/Device without reading its
+// observation values. Site has the same dataset-qualified form as Next output.
+type DeviceIdentity struct {
+	Dataset string
+	Site    string
+	Device  string
+	Type    string
+}
+
 type processColumn struct {
 	index  int
 	site   string
@@ -92,6 +101,42 @@ func openSources(sources []sourceSpec) (*EventStream, error) {
 		}
 	}
 	return &EventStream{sources: sources}, nil
+}
+
+// SourceDevices reads only source schemas and returns unique devices in first
+// source-column order. It does not emit or materialize observation records.
+func (s *EventStream) SourceDevices() ([]DeviceIdentity, error) {
+	if s == nil || s.closed {
+		return nil, errors.New("canonicalize: stream is closed")
+	}
+	seen := make(map[string]struct{})
+	var devices []DeviceIdentity
+	for _, spec := range s.sources {
+		var rows sourceRows
+		var err error
+		if spec.kind == "swat" {
+			rows, err = openSWATRows(spec)
+		} else {
+			rows, err = openCSVRows(spec)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("canonicalize source devices %s: %w", spec.path, err)
+		}
+		for _, column := range rows.Columns() {
+			site := spec.dataset + ":" + column.site
+			key := fmt.Sprintf("%d:%s:%s", len(site), site, column.device)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			devices = append(devices, DeviceIdentity{Dataset: spec.dataset, Site: site,
+				Device: column.device, Type: column.typ})
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return devices, nil
 }
 
 func (s *EventStream) openNext() error {

@@ -19,6 +19,7 @@ import (
 	checkpointpostgresql "github.com/SirojWongpitakroj/mva-phv/internal/checkpoint"
 	cppostgresql "github.com/SirojWongpitakroj/mva-phv/internal/cloudprovider/postgresql"
 	"github.com/SirojWongpitakroj/mva-phv/internal/storage/cassandra"
+	"github.com/SirojWongpitakroj/mva-phv/internal/storage/postgresql/placement"
 	"github.com/SirojWongpitakroj/mva-phv/internal/system"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -33,14 +34,18 @@ func run() error {
 	if err := loadEnvLocal(".env.local"); err != nil {
 		return err
 	}
-	regions := flag.Int("regions", 1, "number of regions")
-	shards := flag.Int("shards-per-region", 1, "shards in each region")
+	regions := flag.Int("regions", 4, "number of regions")
+	shards := flag.Int("shards-per-region", 16, "shards in each region")
 	segmentSize := flag.Int("max-segment-size", 1024, "maximum leaves per segment")
 	sealInterval := flag.Duration("seal-interval", time.Minute, "maximum age of an active segment")
 	mvaOrder := flag.Int("mva-order", 32, "MVA tree order")
 	filterItems := flag.Int("filter-items", 10000, "expected Bloom filter items")
 	falsePositive := flag.Float64("false-positive", 0.01, "Bloom filter false-positive probability")
 	auditWorkers := flag.Int("audit-workers", 4, "maximum concurrent audit retrievals")
+	smokeFile := flag.String("smoke-workload", "", "private canonical JSONL smoke workload to ingest")
+	smokeEpoch := flag.Uint64("smoke-epoch", 1, "finalized epoch for the smoke workload")
+	ingestWorkers := flag.Int("ingest-workers", 32, "maximum concurrent smoke ingestion calls")
+	bootstrap := flag.Bool("bootstrap", false, "create missing PostgreSQL experiment tables and placement database")
 	flag.Parse()
 
 	key, err := hex.DecodeString(os.Getenv("MVA_PHV_ENCRYPTION_KEY_HEX"))
@@ -60,13 +65,8 @@ func run() error {
 		AuditWorkers:    *auditWorkers,
 	}
 	mode := os.Getenv("MVA_MODE")
-	if mode == "" || mode == "memory" {
-		_, err = system.New(config)
-		if err == nil {
-			fmt.Println("MVA-PHV initialized (in-memory mode)")
-		}
-	} else if mode == "aws" {
-		err = runPersistent(config)
+	if mode == "" || mode == "aws" {
+		err = runPersistent(config, *smokeFile, *smokeEpoch, *ingestWorkers, *bootstrap)
 	} else {
 		return fmt.Errorf("unsupported MVA_MODE %q", mode)
 	}
@@ -136,7 +136,45 @@ func openPostgreSQL(ctx context.Context, prefix string) (*sql.DB, error) {
 	return db, nil
 }
 
-func runPersistent(config system.Config) error {
+func setPlacementDefaults() {
+	if os.Getenv("MVA_PLACEMENT_HOST") != "" || os.Getenv("MVA_PLACEMENT_DATABASE") != "" {
+		return
+	}
+	for _, suffix := range []string{"HOST", "PORT", "USER", "PASSWORD", "SSLMODE"} {
+		_ = os.Setenv("MVA_PLACEMENT_"+suffix, os.Getenv("MVA_CHECKPOINT_"+suffix))
+	}
+	_ = os.Setenv("MVA_PLACEMENT_DATABASE", "mva_phv_placement")
+}
+
+func ensurePlacementDatabase(ctx context.Context, checkpointDB *sql.DB) error {
+	if os.Getenv("MVA_PLACEMENT_DATABASE") != "mva_phv_placement" ||
+		os.Getenv("MVA_PLACEMENT_HOST") != os.Getenv("MVA_CHECKPOINT_HOST") ||
+		os.Getenv("MVA_PLACEMENT_PORT") != os.Getenv("MVA_CHECKPOINT_PORT") {
+		return nil // An explicitly configured placement database is managed externally.
+	}
+	var exists bool
+	if err := checkpointDB.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = 'mva_phv_placement')`).Scan(&exists); err != nil {
+		return fmt.Errorf("check placement database: %w", err)
+	}
+	if exists {
+		return nil
+	}
+	if _, err := checkpointDB.ExecContext(ctx, `CREATE DATABASE mva_phv_placement`); err != nil {
+		return fmt.Errorf("create separate placement database: %w", err)
+	}
+	return nil
+}
+
+func runPersistent(config system.Config, smokeFile string, smokeEpoch uint64, ingestWorkers int, bootstrap bool) error {
+	setPlacementDefaults()
+	for _, other := range []string{"MVA_CP", "MVA_CHECKPOINT"} {
+		if os.Getenv("MVA_PLACEMENT_HOST") == os.Getenv(other+"_HOST") &&
+			os.Getenv("MVA_PLACEMENT_PORT") == os.Getenv(other+"_PORT") &&
+			os.Getenv("MVA_PLACEMENT_DATABASE") == os.Getenv(other+"_DATABASE") {
+			return fmt.Errorf("MVA_PLACEMENT must use a database separate from %s", other)
+		}
+	}
 	openDB := func(prefix string) (*sql.DB, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
@@ -147,11 +185,39 @@ func runPersistent(config system.Config) error {
 		return err
 	}
 	defer cpDB.Close()
+	if ingestWorkers < 1 || ingestWorkers > 64 {
+		return fmt.Errorf("ingest workers must be between 1 and 64")
+	}
+	cpDB.SetMaxOpenConns(ingestWorkers)
 	checkpointDB, err := openDB("MVA_CHECKPOINT")
 	if err != nil {
 		return err
 	}
 	defer checkpointDB.Close()
+	if bootstrap {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		if err := ensurePlacementDatabase(ctx, checkpointDB); err != nil {
+			cancel()
+			return err
+		}
+		cancel()
+	}
+	placementDB, err := openDB("MVA_PLACEMENT")
+	if err != nil {
+		return err
+	}
+	defer placementDB.Close()
+	placements, err := placement.New(placementDB)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if err := placements.EnsureSchema(ctx); err != nil {
+		return err
+	}
+	config.SiteRegions = placements
+	config.DeviceShards = placement.ShardStore{Store: placements}
 	client, closeTunnel, err := openCassandra()
 	if err != nil {
 		return err
@@ -170,10 +236,26 @@ func runPersistent(config system.Config) error {
 	if err != nil {
 		return err
 	}
-	if _, err := system.NewWithStorage(config, cp, cls, checkpoints); err != nil {
+	if bootstrap {
+		schemaCtx, schemaCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer schemaCancel()
+		if err := cp.EnsureSchema(schemaCtx); err != nil {
+			return fmt.Errorf("prepare CP schema: %w", err)
+		}
+		if err := checkpoints.EnsureSchema(schemaCtx); err != nil {
+			return fmt.Errorf("prepare checkpoint schema: %w", err)
+		}
+	}
+	app, err := system.NewWithStorage(config, cp, cls, checkpoints)
+	if err != nil {
 		return err
 	}
-	fmt.Println("MVA-PHV initialized with Cassandra CLS, PostgreSQL CP, and PostgreSQL checkpoint store")
+	if smokeFile != "" {
+		if err := runSmokeWorkload(app, cpDB, checkpointDB, placementDB, client, cls, checkpoints, smokeFile, smokeEpoch, config.SealInterval, ingestWorkers); err != nil {
+			return err
+		}
+	}
+	fmt.Println("MVA-PHV initialized with Cassandra CLS, PostgreSQL CP, PostgreSQL placement control plane, and PostgreSQL checkpoint store")
 	return nil
 }
 
@@ -205,9 +287,13 @@ func openCassandra() (*cassandra.GocqlClient, func(), error) {
 		}
 		listener.Close()
 		forward := address + ":127.0.0.1:" + strconv.Itoa(port)
-		cmd := exec.Command("ssh", "-N", "-L", forward, "-i", key,
+		sshArgs := []string{"-N", "-L", forward, "-i", key,
 			"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
-			"-o", "ExitOnForwardFailure=yes", "-o", "ConnectTimeout=7", user+"@"+host)
+			"-o", "ExitOnForwardFailure=yes", "-o", "ConnectTimeout=7"}
+		if knownHosts := os.Getenv("MVA_CASSANDRA_SSH_KNOWN_HOSTS"); knownHosts != "" {
+			sshArgs = append(sshArgs, "-o", "UserKnownHostsFile="+knownHosts)
+		}
+		cmd := exec.Command("ssh", append(sshArgs, user+"@"+host)...)
 		if err := cmd.Start(); err != nil {
 			return nil, nil, fmt.Errorf("start Cassandra SSH tunnel: %w", err)
 		}

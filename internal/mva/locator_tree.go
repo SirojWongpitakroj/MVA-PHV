@@ -31,9 +31,41 @@ func (updates pageUpdates) pages() []Page {
 
 	pages := make([]Page, 0, len(pageIDs))
 	for _, pageID := range pageIDs {
-		pages = append(pages, *updates[pageID])
+		pages = append(pages, snapshotUpdatedPage(updates[pageID]))
 	}
 	return pages
+}
+
+// snapshotUpdatedPage detaches one changed page from the mutable working tree.
+// The repository may serialize this update after another goroutine inserts a
+// later record, so its keys, values, links, and child hashes must stay fixed.
+func snapshotUpdatedPage(page *Page) Page {
+	copyPage := *page
+	copyPage.Keys = slices.Clone(page.Keys)
+	copyPage.Values = make([]*LocatorValue, len(page.Values))
+	for i, value := range page.Values {
+		copyPage.Values[i] = cloneLocatorValue(value)
+	}
+	copyPage.Children = make([]*Page, len(page.Children))
+	for i, child := range page.Children {
+		if child != nil {
+			copyPage.Children[i] = &Page{PageID: child.PageID, Hash: child.Hash}
+		}
+	}
+	if page.Parent != nil {
+		copyPage.Parent = &Page{PageID: page.Parent.PageID}
+	}
+	if page.ParentPageID != nil {
+		parentID := *page.ParentPageID
+		copyPage.ParentPageID = &parentID
+	}
+	if page.Prev != nil {
+		copyPage.Prev = &Page{PageID: page.Prev.PageID}
+	}
+	if page.Next != nil {
+		copyPage.Next = &Page{PageID: page.Next.PageID}
+	}
+	return copyPage
 }
 
 // Helper fucntion: point to the embed the page to the pageID

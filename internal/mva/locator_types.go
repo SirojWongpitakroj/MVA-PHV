@@ -3,6 +3,8 @@ package mva
 import (
 	"bytes"
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 	"uuid"
@@ -123,6 +125,40 @@ type LogIDQuery struct{ ID uuid.UUID }
 
 func (LogIDQuery) isLogViewKey() bool             { return true }
 func (q LogIDQuery) Compare(other LocatorKey) int { return q.ID.Compare(other.LogID()) }
+
+// LogIDBatchQuery requests exactly these IDs. RegionID is an optional,
+// untrusted routing hint; every returned value still needs an MVA proof.
+// Targets must be sorted by ID and unique; NewLogIDBatchQuery does that.
+type LogIDBatchTarget struct {
+	ID       uuid.UUID
+	RegionID string
+}
+
+type LogIDBatchQuery struct{ Targets []LogIDBatchTarget }
+
+func NewLogIDBatchQuery(targets []LogIDBatchTarget) (LogIDBatchQuery, error) {
+	if len(targets) == 0 {
+		return LogIDBatchQuery{}, fmt.Errorf("MVA: empty LogID batch")
+	}
+	out := append([]LogIDBatchTarget(nil), targets...)
+	slices.SortFunc(out, func(a, b LogIDBatchTarget) int { return a.ID.Compare(b.ID) })
+	for i, target := range out {
+		if target.ID == (uuid.UUID{}) || i > 0 && target.ID == out[i-1].ID {
+			return LogIDBatchQuery{}, fmt.Errorf("MVA: zero or duplicate LogID in batch")
+		}
+	}
+	return LogIDBatchQuery{Targets: out}, nil
+}
+
+func (LogIDBatchQuery) isLogViewKey() bool { return true }
+func (q LogIDBatchQuery) Compare(other LocatorKey) int {
+	id := other.LogID()
+	i := sort.Search(len(q.Targets), func(i int) bool { return q.Targets[i].ID.Compare(id) >= 0 })
+	if i < len(q.Targets) && q.Targets[i].ID == id {
+		return 0
+	}
+	return 1
+}
 
 // SiteQuery and SiteDeviceQuery select the complete authenticated attribute
 // prefix. Time-limited queries require AttrRangeQuery's full attribute key.

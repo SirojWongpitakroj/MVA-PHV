@@ -7,6 +7,7 @@ func init() {
 	gob.Register(idKey{})
 	gob.Register(AttrRangeQuery{})
 	gob.Register(LogIDQuery{})
+	gob.Register(LogIDBatchQuery{})
 	gob.Register(SiteQuery{})
 	gob.Register(SiteDeviceQuery{})
 	gob.Register(TimeRangeQuery{})

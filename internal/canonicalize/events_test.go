@@ -146,6 +146,35 @@ func TestWADIStreamingOrderMissingAndSampleCap(t *testing.T) {
 	}
 }
 
+func TestSourceDevicesUsesHeadersAndDeduplicatesChannels(t *testing.T) {
+	dir := t.TempDir()
+	header := "Row,Date,Time,1_FIT_001_PV,1_FIT_001_SP,2_LT_001_PV\n"
+	if err := os.WriteFile(filepath.Join(dir, "WADI_14days_new.csv"),
+		[]byte(header+"1,9/25/2017,00:00.0,,,\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "WADI_attackdataLABLE.csv"),
+		[]byte("0,1,2,3,4,5,6\n"+
+			"Row,Date,Time,1_FIT_001_PV,1_FIT_001_SP,2_LT_001_PV,Attack LABLE\n"+
+			"1,10/9/2017,00:00.0,,,,-1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stream, err := OpenWADI(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	devices, err := stream.SourceDevices()
+	if err != nil || len(devices) != 2 ||
+		devices[0].Site != "WADI:P1" || devices[0].Device != "FIT_001" ||
+		devices[1].Site != "WADI:P2" || devices[1].Device != "LT_001" {
+		t.Fatalf("source devices: %+v, %v", devices, err)
+	}
+	if _, err := stream.Next(context.Background()); err != io.EOF {
+		t.Fatalf("empty observations unexpectedly emitted: %v", err)
+	}
+}
+
 func TestCSVAttackLabelAndMalformedRows(t *testing.T) {
 	dir := t.TempDir()
 	wadi := filepath.Join(dir, "attack.csv")

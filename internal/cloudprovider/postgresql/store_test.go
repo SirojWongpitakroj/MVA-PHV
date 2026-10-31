@@ -12,14 +12,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 	"uuid"
 
 	"github.com/SirojWongpitakroj/mva-phv/internal/cloudprovider"
-	"github.com/SirojWongpitakroj/mva-phv/internal/mpm"
-	"github.com/SirojWongpitakroj/mva-phv/internal/mva"
-	"github.com/SirojWongpitakroj/mva-phv/internal/phv"
-	"github.com/SirojWongpitakroj/mva-phv/internal/system"
 )
 
 type fakeState struct {
@@ -212,53 +207,32 @@ func TestExternalPostgreSQLCPChunksLargeExactLogIDSet(t *testing.T) {
 	}
 }
 
-func TestPostgreSQLCPIngestAndFinalizedAudit(t *testing.T) {
+func TestPostgreSQLCPCiphertextRemainsUntrusted(t *testing.T) {
 	provider, state := openFake(t)
-	config := system.Config{NumRegions: 1, ShardsPerRegion: 2, MaxSegmentSize: 1,
-		SealInterval: time.Hour, MVAOrder: 3, FilterItems: 100, FalsePositive: 0.01,
-		EncryptionKey: make([]byte, 32), AuditWorkers: 2}
-	s, err := system.NewWithProvider(config, provider)
-	if err != nil {
-		t.Fatal(err)
-	}
 	ctx := context.Background()
-	input := mpm.Input{RegionID: "0", SiteID: "P3", DeviceID: "P3_LIT01", Type: "LevelReading",
-		TS: time.Unix(600, 0).UTC(), Plaintext: []byte(`{"level_cm":142.5}`)}
-	receipt, err := s.Ingest(ctx, input, input.TS)
-	if err != nil {
+	original := record(1)
+	if err := provider.StoreCiphertext(ctx, "0", original); err != nil {
 		t.Fatal(err)
 	}
-	stored, err := provider.GetCiphertexts(ctx, "0", []uuid.UUID{receipt.LogID})
-	if err != nil || len(stored) != 1 || string(stored[0].Ciphertext) == string(input.Plaintext) {
+	stored, err := provider.GetCiphertexts(ctx, "0", []uuid.UUID{original.LogID})
+	if err != nil || len(stored) != 1 || !slices.Equal(stored[0].Ciphertext, original.Ciphertext) {
 		t.Fatalf("CP PostgreSQL record missing or plaintext: %+v, %v", stored, err)
 	}
-	if _, err := s.PrepareFinalization(ctx, 1); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.CommitFinalization(ctx, 1); err != nil {
-		t.Fatal(err)
-	}
-	query := phv.Request{Epoch: 1, Query: mva.AttrRangeQuery{SiteID: input.SiteID, DevID: input.DeviceID,
-		Type: input.Type, StartTS: input.TS, EndTS: input.TS}, UsePruning: true}
-	good, err := s.Audit(ctx, query)
-	if err != nil || !good.Verified {
-		t.Fatalf("PostgreSQL CP audit failed: verified=%v err=%v", good.Verified, err)
-	}
 	state.mu.Lock()
-	changed := state.values[receipt.LogID.String()]
+	changed := state.values[original.LogID.String()]
 	changed.Ciphertext = slices.Clone(changed.Ciphertext)
 	changed.Ciphertext[0] ^= 1
-	state.values[receipt.LogID.String()] = changed
+	state.values[original.LogID.String()] = changed
 	state.mu.Unlock()
-	tampered, err := s.Audit(ctx, query)
-	if err != nil || tampered.Verified || tampered.Unresolved {
-		t.Fatalf("tampered CP object was accepted or misclassified: verified=%v unresolved=%v err=%v", tampered.Verified, tampered.Unresolved, err)
+	tampered, err := provider.GetCiphertexts(ctx, "0", []uuid.UUID{original.LogID})
+	if err != nil || len(tampered) != 1 || slices.Equal(tampered[0].Ciphertext, original.Ciphertext) {
+		t.Fatalf("CP failed to return untrusted modified ciphertext: %+v, %v", tampered, err)
 	}
 	state.mu.Lock()
-	delete(state.values, receipt.LogID.String())
+	delete(state.values, original.LogID.String())
 	state.mu.Unlock()
-	missing, err := s.Audit(ctx, query)
-	if !errors.Is(err, phv.ErrMissingEvidence) || !missing.Unresolved {
-		t.Fatalf("missing CP object was classified as tampering: unresolved=%v err=%v", missing.Unresolved, err)
+	missing, err := provider.GetCiphertexts(ctx, "0", []uuid.UUID{original.LogID})
+	if err != nil || len(missing) != 0 {
+		t.Fatalf("missing CP object was not reported as unavailable: %+v, %v", missing, err)
 	}
 }

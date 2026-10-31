@@ -2,6 +2,7 @@ package system
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
@@ -16,11 +17,12 @@ import (
 	"github.com/SirojWongpitakroj/mva-phv/internal/storage/cassandra"
 )
 
-// Config describes one fresh, in-memory system. Region IDs are "0" through
+// Config describes one fresh system. Region IDs are "0" through
 // NumRegions-1, matching the current MVA and HPBF constructors.
 type Config struct {
 	NumRegions      int
-	SiteRegions     mpm.SiteRegionStore // Required for durable multi-region deployments.
+	SiteRegions     mpm.SiteRegionStore  // Required for durable multi-region deployments.
+	DeviceShards    mpm.DeviceShardStore // Required for durable sticky Shard placement.
 	ShardsPerRegion int
 	MaxSegmentSize  int
 	SealInterval    time.Duration
@@ -36,29 +38,21 @@ type Config struct {
 type System struct {
 	manager     *mpm.Manager
 	auditor     *phv.Auditor
-	evidence    *MemoryEvidence
+	evidence    mpm.EvidenceRepository
 	ciphertexts cloudprovider.Provider
-	checkpoints *MemoryCheckpoints
+	checkpoints mpm.CheckpointStore
 	trusted     mpm.CheckpointStore
 }
 
-// New creates all components for a fresh process. Its in-memory evidence and
-// checkpoints are intentionally ephemeral; they do not provide restart recovery.
-func New(config Config) (*System, error) {
-	return NewWithProvider(config, cloudprovider.NewMemory())
+type evidencePorts struct {
+	writes   mpm.EvidenceRepository
+	reads    phv.Repository
+	roots    phv.TrustedRoots
+	pruner   phv.Pruner
+	resolver phv.Resolver
 }
 
-// NewWithProvider wires an external CP implementation into both MPM ingestion
-// and PHV audits. CLS evidence and the checkpoint store remain independent.
-func NewWithProvider(config Config, ciphertexts cloudprovider.Provider) (*System, error) {
-	checkpoints := NewMemoryCheckpoints()
-	s, err := newSystem(config, ciphertexts, nil, checkpoints)
-	if err != nil {
-		return nil, err
-	}
-	s.checkpoints = checkpoints
-	return s, nil
-}
+type evidenceWiring func(*hmf.HMF, *mva.MVA, *hpbf.HPBF) (evidencePorts, error)
 
 // NewWithStorage uses Cassandra for CLS evidence and an independent trusted
 // checkpoint store. This constructor is for a fresh deployment; restoring an
@@ -70,18 +64,31 @@ func NewWithStorage(config Config, ciphertexts cloudprovider.Provider, cls *cass
 	if config.NumRegions > 1 && config.SiteRegions == nil {
 		return nil, fmt.Errorf("new system: persistent multi-region deployment requires a durable site-region store")
 	}
-	return newSystem(config, ciphertexts, cls, checkpoints)
+	if config.ShardsPerRegion > 1 && config.DeviceShards == nil {
+		return nil, fmt.Errorf("new system: persistent multi-Shard deployment requires a durable device-Shard store")
+	}
+	return newSystem(config, ciphertexts, checkpoints, func(h *hmf.HMF, m *mva.MVA, p *hpbf.HPBF) (evidencePorts, error) {
+		source := &cassandra.ComponentEvidenceSource{Store: cls, HMF: h, MVA: m, HPBF: p}
+		writes, err := cassandra.NewMPMRepository(cls, source)
+		if err != nil {
+			return evidencePorts{}, fmt.Errorf("new system CLS: %w", err)
+		}
+		return evidencePorts{writes: writes, reads: cls,
+			roots:    phv.CheckpointRoots{Evidence: cls, Checkpoints: checkpoints},
+			pruner:   phv.HistoricalHPBFPruner{Source: cls},
+			resolver: phv.HistoricalMVAResolver{Reader: cls}}, nil
+	})
 }
 
-func newSystem(config Config, ciphertexts cloudprovider.Provider, cls *cassandra.Store, checkpoints mpm.CheckpointStore) (*System, error) {
+func newSystem(config Config, ciphertexts cloudprovider.Provider, checkpoints mpm.CheckpointStore, wire evidenceWiring) (*System, error) {
 	if config.NumRegions <= 0 || config.ShardsPerRegion <= 0 || config.MaxSegmentSize <= 0 ||
 		config.SealInterval <= 0 || config.MVAOrder < 3 || config.FilterItems <= 0 ||
 		config.FalsePositive <= 0 || config.FalsePositive >= 1 || len(config.EncryptionKey) != 32 ||
 		config.AuditWorkers < 0 {
 		return nil, fmt.Errorf("new system: invalid region, shard, segment, MVA, HPBF, key, or worker configuration")
 	}
-	if ciphertexts == nil {
-		return nil, fmt.Errorf("new system: ciphertext provider is required")
+	if ciphertexts == nil || checkpoints == nil || wire == nil {
+		return nil, fmt.Errorf("new system: ciphertext provider, checkpoint store, and evidence wiring are required")
 	}
 	h, err := hmf.NewHMF(config.NumRegions, config.ShardsPerRegion, config.MaxSegmentSize, config.SealInterval)
 	if err != nil {
@@ -99,58 +106,44 @@ func newSystem(config Config, ciphertexts cloudprovider.Provider, cls *cassandra
 	if err != nil {
 		return nil, fmt.Errorf("new system encryptor: %w", err)
 	}
-	var evidence mpm.EvidenceRepository
-	var proofRepo phv.Repository
-	var roots phv.TrustedRoots
-	var pruner phv.Pruner
-	var resolver phv.Resolver
-	var memoryEvidence *MemoryEvidence
-	if cls == nil {
-		memoryEvidence, err = newMemoryEvidence(config.NumRegions, config.ShardsPerRegion, h)
-		if err != nil {
-			return nil, fmt.Errorf("new system evidence: %w", err)
-		}
-		evidence, proofRepo = memoryEvidence, memoryEvidence
-		pruner = phv.CurrentHPBFPruner{Tree: p}
-		resolver = phv.CurrentMVAResolver{Tree: m}
-	} else {
-		source := &cassandra.ComponentEvidenceSource{Store: cls, HMF: h, MVA: m, HPBF: p}
-		evidence, err = cassandra.NewMPMRepository(cls, source)
-		if err != nil {
-			return nil, fmt.Errorf("new system CLS: %w", err)
-		}
-		proofRepo = cls
-		roots = phv.CheckpointRoots{Evidence: cls, Checkpoints: checkpoints}
-		pruner = phv.HistoricalHPBFPruner{Source: cls}
-		resolver = phv.HistoricalMVAResolver{Reader: cls}
+	ports, err := wire(h, m, p)
+	if err != nil {
+		return nil, err
+	}
+	if ports.writes == nil || ports.reads == nil || ports.pruner == nil || ports.resolver == nil {
+		return nil, fmt.Errorf("new system: incomplete evidence wiring")
 	}
 	regions := make([]string, config.NumRegions)
 	for i := range regions {
 		regions[i] = strconv.Itoa(i)
 	}
 	siteRegions := config.SiteRegions
-	if siteRegions == nil && cls == nil {
+	if siteRegions == nil {
 		siteRegions = mpm.NewMemorySiteRegions()
 	}
+	deviceShards := config.DeviceShards
+	if deviceShards == nil {
+		deviceShards = mpm.NewMemoryDeviceShards()
+	}
 	manager, err := mpm.New(mpm.Options{
-		Regions: regions, SiteRegions: siteRegions,
+		Regions: regions, SiteRegions: siteRegions, ShardsPerRegion: config.ShardsPerRegion, DeviceShards: deviceShards,
 		HMF: &mpm.HMFAdapter{Tree: h}, MVA: &mpm.MVAAdapter{Tree: m},
 		HPBF: &mpm.HPBFAdapter{Tree: p}, Encryptor: encryptor,
-		Locator: mpm.CanonicalLocator{}, Evidence: evidence, Ciphertexts: ciphertexts, Checkpoints: checkpoints,
+		Locator: mpm.CanonicalLocator{}, Evidence: ports.writes, Ciphertexts: ciphertexts, Checkpoints: checkpoints,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("new system MPM: %w", err)
 	}
-	if roots == nil {
-		roots = phv.CurrentRoots{Manager: manager, Checkpoints: checkpoints}
+	if ports.roots == nil {
+		ports.roots = phv.CurrentRoots{Manager: manager, Checkpoints: checkpoints}
 	}
 	auditor := &phv.Auditor{
-		Roots:  roots,
-		Pruner: pruner, Resolver: resolver,
-		Repository: proofRepo, Ciphertexts: ciphertexts, Topology: phv.Topology{RegionIDs: regions, ShardsPerRegion: config.ShardsPerRegion},
+		Roots:  ports.roots,
+		Pruner: ports.pruner, Resolver: ports.resolver,
+		Repository: ports.reads, Ciphertexts: ciphertexts, Topology: phv.Topology{RegionIDs: regions, ShardsPerRegion: config.ShardsPerRegion},
 		Workers: config.AuditWorkers,
 	}
-	return &System{manager: manager, auditor: auditor, evidence: memoryEvidence, ciphertexts: ciphertexts, trusted: checkpoints}, nil
+	return &System{manager: manager, auditor: auditor, evidence: ports.writes, ciphertexts: ciphertexts, checkpoints: checkpoints, trusted: checkpoints}, nil
 }
 
 func (s *System) Ingest(ctx context.Context, input mpm.Input, now time.Time) (mpm.Receipt, error) {
@@ -158,6 +151,21 @@ func (s *System) Ingest(ctx context.Context, input mpm.Input, now time.Time) (mp
 		return mpm.Receipt{}, fmt.Errorf("system: not initialized")
 	}
 	return s.manager.Ingest(ctx, input, now)
+}
+
+// IngestCanonical sends one dataset observation to MPM. Value and Label stay
+// in the encrypted plaintext; MPM derives placement only from identity fields.
+func (s *System) IngestCanonical(ctx context.Context, event canonicalize.CanonicalRecord, now time.Time) (mpm.Receipt, error) {
+	if event.Dataset == "" || event.Site == "" || event.Device == "" || event.Type == "" ||
+		event.Timestamp.IsZero() || event.Value == "" || (event.Label != "normal" && event.Label != "attack") {
+		return mpm.Receipt{}, fmt.Errorf("system: invalid canonical record")
+	}
+	plaintext, err := json.Marshal(event)
+	if err != nil {
+		return mpm.Receipt{}, fmt.Errorf("system: encode canonical record: %w", err)
+	}
+	return s.Ingest(ctx, mpm.Input{Dataset: event.Dataset, SiteID: event.Site,
+		DeviceID: event.Device, Type: event.Type, TS: event.Timestamp, Plaintext: plaintext}, now)
 }
 
 func (s *System) SealExpired(ctx context.Context, now time.Time) error {
@@ -195,15 +203,11 @@ func (s *System) Audit(ctx context.Context, request phv.Request) (phv.Result, er
 	return s.auditor.Audit(ctx, request)
 }
 
-// VerifyProof checks a detached audit package against this process's trusted
-// in-memory checkpoint store, without consulting live component state.
+// VerifyProof checks a detached audit package against the trusted checkpoint
+// store, without consulting live component state.
 func (s *System) VerifyProof(ctx context.Context, proof phv.Proof) (phv.Verification, error) {
 	if s == nil || s.trusted == nil {
 		return phv.Verification{}, fmt.Errorf("system: not initialized")
 	}
 	return phv.VerifyAuditProof(ctx, proof, s.trusted)
 }
-
-var _ mpm.EvidenceRepository = (*MemoryEvidence)(nil)
-var _ phv.Repository = (*MemoryEvidence)(nil)
-var _ mpm.CheckpointStore = (*MemoryCheckpoints)(nil)

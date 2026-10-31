@@ -70,6 +70,13 @@ type MVAProof struct {
 	Epoch   uint64
 	Levels  [][][32]byte
 	Regions map[string]*MVARegionProof
+	Batch   []MVABatchItem
+}
+
+type MVABatchItem struct {
+	Target  LogIDBatchTarget
+	Regions []merkle.TreeID
+	Proof   *MVAProof
 }
 
 type MVARegionProof struct {

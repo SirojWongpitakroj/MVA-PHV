@@ -5,6 +5,29 @@ import (
 	"time"
 )
 
+func TestReserveOnAssignedShard(t *testing.T) {
+	h, err := NewHMF(1, 16, 2, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1, 0)
+	for _, sid := range []int64{0, 7, 15} {
+		r, err := h.ReserveOnShard("0", sid, now)
+		if err != nil || r.Address().ShardID != sid || r.Address().LeafID != 0 {
+			t.Fatalf("assigned Shard %d: %+v, %v", sid, r, err)
+		}
+		if err := h.CommitReservation(r, [32]byte{byte(sid + 1)}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := h.ReserveOnShard("0", 16, now); err == nil {
+		t.Fatal("unconfigured Shard accepted")
+	}
+	if _, err := h.ReserveOnShard("missing", 0, now); err == nil {
+		t.Fatal("unconfigured Region accepted")
+	}
+}
+
 func TestReservationAddressBeforeCommitAndAbort(t *testing.T) {
 	h, err := NewHMF(1, 1, 2, time.Hour)
 	if err != nil {

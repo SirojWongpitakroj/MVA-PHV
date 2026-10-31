@@ -44,12 +44,21 @@ func (h *HMF) ReserveAddress(rid, siteID, devID string, now time.Time) (*Reserva
 	if h == nil {
 		return nil, fmt.Errorf("reserve HMF address: HMF is nil")
 	}
-	if now.IsZero() {
-		return nil, fmt.Errorf("reserve HMF address: timestamp is zero")
-	}
 	sid, err := h.SelectShard(rid, siteID, devID)
 	if err != nil {
 		return nil, err
+	}
+	return h.ReserveOnShard(rid, sid, now)
+}
+
+// ReserveOnShard reserves the next position in a Shard assigned by MPM.
+// HMF validates the position and retains ownership of Segment allocation.
+func (h *HMF) ReserveOnShard(rid string, sid int64, now time.Time) (*Reservation, error) {
+	if h == nil {
+		return nil, fmt.Errorf("reserve HMF address: HMF is nil")
+	}
+	if now.IsZero() {
+		return nil, fmt.Errorf("reserve HMF address: timestamp is zero")
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()

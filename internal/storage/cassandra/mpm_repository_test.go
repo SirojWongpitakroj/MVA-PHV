@@ -87,6 +87,37 @@ func countWrites(writes []repositoryWrite, table string) int {
 	return n
 }
 
+func TestMVAChangedPagesRemainSerializableAfterLaterIngests(t *testing.T) {
+	tree, err := mva.NewMVA(1, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type saved struct {
+		view   string
+		update mva.LocatorUpdate
+	}
+	var updates []saved
+	for i := 0; i < 50; i++ {
+		id := uuid.UUID{byte(i + 1)}
+		address := mva.PhysicalAddress{RegionID: "0", ShardID: "0", SegmentID: "0", LeafID: "0"}
+		byID, byAttr, err := tree.IngestRecord(mva.PendingRecord{
+			LogID: id, RegionID: "0", SiteID: "SITE", DeviceID: "DEVICE", Type: "TYPE",
+			TS: time.Unix(int64(i), 0), Address: address, Locator: [32]byte{byte(i + 1)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		updates = append(updates, saved{"id", byID}, saved{"attribute", byAttr})
+	}
+	for _, update := range updates {
+		for _, page := range update.update.Pages {
+			if _, err := pageVersion(page, update.view, 1); err != nil {
+				t.Fatalf("changed %s page %d lost its original hash: %v", update.view, page.PageID, err)
+			}
+		}
+	}
+}
+
 func TestMPMRepositoryPersistsAcceptedRecordAndWorkingState(t *testing.T) {
 	client := &repositoryClient{}
 	store, _ := NewStore(client)

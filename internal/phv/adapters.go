@@ -108,11 +108,23 @@ func (s CurrentMVAResolver) Resolve(ctx context.Context, epoch uint64, query mva
 		return Resolution{}, err
 	}
 	switch query.(type) {
-	case mva.AttrRangeQuery, mva.LogIDQuery, mva.SiteQuery, mva.SiteDeviceQuery, mva.TimeRangeQuery:
+	case mva.AttrRangeQuery, mva.LogIDQuery, mva.LogIDBatchQuery, mva.SiteQuery, mva.SiteDeviceQuery, mva.TimeRangeQuery:
 	default:
 		return Resolution{}, fmt.Errorf("PHV: unsupported MVA query type")
 	}
-	values, proof, err := s.Tree.Resolve(query, regions)
+	var values []*mva.LocatorValue
+	var proof *mva.MVAProof
+	var err error
+	if batch, ok := query.(mva.LogIDBatchQuery); ok {
+		values, proof, err = mva.ResolveLogIDBatch(ctx, batch, regions, func(_ context.Context, q mva.LogIDQuery, rs []merkle.TreeID) ([]*mva.LocatorValue, *mva.MVAProof, error) {
+			return s.Tree.Resolve(q, rs)
+		})
+		if proof != nil {
+			proof.Epoch = epoch
+		}
+	} else {
+		values, proof, err = s.Tree.Resolve(query, regions)
+	}
 	if err != nil {
 		return Resolution{}, err
 	}
@@ -149,7 +161,9 @@ func selectedFromValues(query mva.LocatorQuery, regions []merkle.TreeID, values 
 		var ts time.Time
 		id := value.LocatorKey.LogID()
 		fromLog := false
-		if _, isID := query.(mva.LogIDQuery); isID {
+		_, isID := query.(mva.LogIDQuery)
+		_, isBatch := query.(mva.LogIDBatchQuery)
+		if isID || isBatch {
 			fromLog = true
 		} else {
 			key, err := value.LocatorKey.Serialize()

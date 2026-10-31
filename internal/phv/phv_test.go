@@ -1216,11 +1216,47 @@ func TestAuditIntegratesFinalizedMVAHPBFAndHMF(t *testing.T) {
 	if err != nil || !result.Verified || len(result.Proof.Logs) != 1 || result.Proof.Logs[0].LogID != f.records[0].LogID {
 		t.Fatalf("integrated audit=%+v err=%v", result, err)
 	}
+	if result.Metrics.MVAProofBytes <= 0 ||
+		result.Metrics.CLSRetrievalTime > result.Metrics.RetrievalTime || result.Metrics.CiphertextRetrievalTime > result.Metrics.RetrievalTime {
+		t.Fatalf("audit stage metrics missing: %+v", result.Metrics)
+	}
 	checkpointBytes, err := domain.Serialize([]byte("CHECKPOINT"), uint64(1), mvaRoot[:], f.root[:], hpbfRoot[:])
 	if err != nil {
 		t.Fatal(err)
 	}
 	checkpoints := fixedCheckpoint{sha256.Sum256(checkpointBytes)}
+	batchQuery, err := mva.NewLogIDBatchQuery([]mva.LogIDBatchTarget{
+		{ID: f.records[0].LogID, RegionID: f.records[0].Address.RegionID},
+		{ID: f.records[1].LogID, RegionID: f.records[1].Address.RegionID},
+		{ID: f.records[len(f.records)-1].LogID, RegionID: f.records[len(f.records)-1].Address.RegionID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := a.Audit(context.Background(), Request{Epoch: 1, Query: batchQuery})
+	if err != nil || !batch.Verified || len(batch.Proof.Selected) != 3 || batch.Metrics.UniqueNodes >= batch.Metrics.NaiveNodes {
+		t.Fatalf("exact LogID batch: selected=%d valid=%v nodes=%d/%d err=%v", len(batch.Proof.Selected), batch.Verified, batch.Metrics.UniqueNodes, batch.Metrics.NaiveNodes, err)
+	}
+	encodedBatch, err := EncodeProof(batch.Proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detachedBatch, err := DecodeProof(encodedBatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkedBatch, err := VerifyAuditProof(context.Background(), detachedBatch, checkpoints)
+	if err != nil || !checkedBatch.Valid {
+		t.Fatalf("detached batch proof: valid=%v err=%v", checkedBatch.Valid, err)
+	}
+	alteredBatch := detachedBatch
+	alteredMVA := *detachedBatch.MVA
+	alteredMVA.Batch = slices.Clone(alteredMVA.Batch)
+	alteredMVA.Batch = alteredMVA.Batch[:2]
+	alteredBatch.MVA = &alteredMVA
+	if _, err := VerifyAuditProof(context.Background(), alteredBatch, checkpoints); err == nil {
+		t.Fatal("accepted missing batch MVA item")
+	}
 	independent, err := VerifyAuditProof(context.Background(), result.Proof, checkpoints)
 	if err != nil || !independent.Valid {
 		t.Fatalf("independent full proof: %+v, %v", independent, err)

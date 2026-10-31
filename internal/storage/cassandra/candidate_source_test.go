@@ -96,6 +96,11 @@ func TestComponentEvidenceSourcePreparedCandidate(t *testing.T) {
 	if err := validateCandidateEvidence(candidate, evidence); err != nil {
 		t.Fatal(err)
 	}
+	for _, node := range evidence.HPBFRegionNodes {
+		if node.Node.Level < 1 {
+			t.Fatalf("HPBF internal node was stored as leaf level: %+v", node)
+		}
+	}
 	if len(evidence.HMFShards) != 1 || len(evidence.HMFNodes) == 0 || len(evidence.MVAPages) == 0 || len(evidence.HPBFShardFilters) != 2 {
 		t.Fatalf("missing changed evidence: HMF Shards %d, nodes %d, MVA pages %d, HPBF filters %d",
 			len(evidence.HMFShards), len(evidence.HMFNodes), len(evidence.MVAPages), len(evidence.HPBFShardFilters))
@@ -131,7 +136,7 @@ func TestConcreteMPMAdaptersIngestPrepareAndCommit(t *testing.T) {
 	}
 	checkpoints := &memoryCheckpoints{values: make(map[uint64][32]byte), fail: true}
 	provider := cloudprovider.NewMemory()
-	manager, err := mpm.NewMPM(mpm.Options{Regions: []string{"0"}, HMF: &mpm.HMFAdapter{Tree: h}, MVA: &mpm.MVAAdapter{Tree: v},
+	manager, err := mpm.NewMPM(mpm.Options{Regions: []string{"0"}, ShardsPerRegion: 2, HMF: &mpm.HMFAdapter{Tree: h}, MVA: &mpm.MVAAdapter{Tree: v},
 		HPBF: &mpm.HPBFAdapter{Tree: p}, Encryptor: encryptor, Locator: mpm.CanonicalLocator{},
 		Evidence: repo, Ciphertexts: provider, Checkpoints: checkpoints})
 	if err != nil {

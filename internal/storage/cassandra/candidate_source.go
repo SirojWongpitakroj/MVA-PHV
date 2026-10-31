@@ -255,17 +255,17 @@ func (s *ComponentEvidenceSource) hpbfEvidence(ctx context.Context, candidate mp
 		}
 		out.HPBFRegionFilters = append(out.HPBFRegionFilters, filter)
 		out.HPBFRegions = append(out.HPBFRegions, HPBFRegionRoot{Epoch: epoch, RegionIndex: int64(part.Index), RegionID: rid, Root: part.RootHash})
-		for level, nodes := range part.InternalNodes {
+		for _, nodes := range part.InternalNodes {
 			for _, node := range nodes {
 				out.HPBFRegionNodes = append(out.HPBFRegionNodes, RegionNode{RegionID: rid, Node: EpochNode{Epoch: epoch,
-					MerkleNodeRecord: MerkleNodeRecord{Level: int32(level), Index: node.Index, Hash: node.Hash}}})
+					MerkleNodeRecord: MerkleNodeRecord{Level: int32(node.Level), Index: node.Index, Hash: node.Hash}}})
 			}
 		}
 	}
-	for level, nodes := range global.InternalNodes {
+	for _, nodes := range global.InternalNodes {
 		for _, node := range nodes {
 			out.HPBFGlobalNodes = append(out.HPBFGlobalNodes, EpochNode{Epoch: epoch,
-				MerkleNodeRecord: MerkleNodeRecord{Level: int32(level), Index: node.Index, Hash: node.Hash}})
+				MerkleNodeRecord: MerkleNodeRecord{Level: int32(node.Level), Index: node.Index, Hash: node.Hash}})
 		}
 	}
 	return nil

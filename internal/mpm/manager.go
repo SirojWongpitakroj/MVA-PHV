@@ -100,6 +100,12 @@ func New(options Options) (*Manager, error) {
 		}
 		options.SiteRegions = NewMemorySiteRegions()
 	}
+	if options.ShardsPerRegion <= 0 {
+		return nil, fmt.Errorf("new MPM: positive ShardsPerRegion is required")
+	}
+	if options.DeviceShards == nil {
+		options.DeviceShards = NewMemoryDeviceShards()
+	}
 	return &Manager{opts: options, shardLocks: make(map[merkle.TreeID]*sync.Mutex),
 		seenIDs: make(map[uuid.UUID]struct{}), records: make(map[merkle.TreeID][]Record),
 		persisted: make(map[merkle.TreeID]struct{}), finalizedEpoch: options.InitialEpoch,
@@ -152,9 +158,9 @@ func (m *Manager) Ingest(ctx context.Context, input Input, now time.Time) (Recei
 	}
 	input.RegionID = region
 	input.SiteID = canonicalSite
-	sid, err := m.opts.HMF.SelectShard(input.RegionID, input.SiteID, input.DeviceID)
+	sid, err := m.opts.DeviceShards.Assign(ctx, input.RegionID, deviceKey(input.SiteID, input.DeviceID), m.opts.ShardsPerRegion)
 	if err != nil {
-		return Receipt{}, fmt.Errorf("ingest MPM: select shard: %w", err)
+		return Receipt{}, fmt.Errorf("ingest MPM: assign Shard: %w", err)
 	}
 	lock := m.lockForShard(input.RegionID, sid)
 	m.gate.RLock()
@@ -178,7 +184,7 @@ func (m *Manager) Ingest(ctx context.Context, input Input, now time.Time) (Recei
 		return Receipt{}, fmt.Errorf("ingest MPM: duplicate LogID %s", id)
 	}
 	desc := Descriptor{RegionID: input.RegionID, SiteID: input.SiteID, DeviceID: input.DeviceID, Type: input.Type, TS: input.TS}
-	reservation, err := m.opts.HMF.Reserve(input.RegionID, input.SiteID, input.DeviceID, now)
+	reservation, err := m.opts.HMF.ReserveShard(input.RegionID, sid, now)
 	if err != nil {
 		return Receipt{}, fmt.Errorf("ingest MPM: reserve HMF address: %w", err)
 	}

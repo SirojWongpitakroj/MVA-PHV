@@ -120,34 +120,39 @@ type Plan struct {
 }
 
 type Metrics struct {
-	SelectedRecords      int
-	NaiveNodes           int
-	UniqueNodes          int
-	DeduplicatedNodes    int
-	DeduplicationRatio   float64
-	NaiveNodeBytes       int64
-	FrontierNodeBytes    int64
-	NaiveHashOperations  int
-	HashOperations       int
-	SegmentGroups        int
-	ShardGroups          int
-	RegionGroups         int
-	GlobalGroups         int
-	RetrievalGroups      int
-	RepositoryCalls      int
-	EvidenceBytes        int64
-	ProofBytes           int64
-	StoragePartitions    int
-	MaxConcurrent        int
-	PlanningTime         time.Duration
-	RetrievalTime        time.Duration
-	AssemblyTime         time.Duration
-	VerificationTime     time.Duration
-	TotalTime            time.Duration
-	LocalizationBranches int
-	LocalizationExpanded int
-	PrunedBranches       int
-	LocalizationTime     time.Duration
+	SelectedRecords         int
+	NaiveNodes              int
+	UniqueNodes             int
+	DeduplicatedNodes       int
+	DeduplicationRatio      float64
+	NaiveNodeBytes          int64
+	FrontierNodeBytes       int64
+	NaiveHashOperations     int
+	HashOperations          int
+	SegmentGroups           int
+	ShardGroups             int
+	RegionGroups            int
+	GlobalGroups            int
+	RetrievalGroups         int
+	RepositoryCalls         int
+	EvidenceBytes           int64
+	ProofBytes              int64
+	StoragePartitions       int
+	MaxConcurrent           int
+	HPBFPruningTime         time.Duration
+	MVAResolutionTime       time.Duration
+	MVAProofBytes           int64
+	PlanningTime            time.Duration
+	RetrievalTime           time.Duration
+	CLSRetrievalTime        time.Duration
+	CiphertextRetrievalTime time.Duration
+	AssemblyTime            time.Duration
+	VerificationTime        time.Duration
+	TotalTime               time.Duration
+	LocalizationBranches    int
+	LocalizationExpanded    int
+	PrunedBranches          int
+	LocalizationTime        time.Duration
 }
 
 type Proof struct {

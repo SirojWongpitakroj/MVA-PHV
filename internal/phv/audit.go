@@ -70,7 +70,9 @@ func (a *Auditor) Audit(ctx context.Context, request Request) (Result, error) {
 		if a.Pruner == nil {
 			return out, fmt.Errorf("PHV: requested HPBF pruning without authenticated pruner")
 		}
+		pruneStarted := time.Now()
 		pruning, pruneErr := a.Pruner.Prune(ctx, request.Epoch, request.Tokens, roots.HPBF)
+		out.Metrics.HPBFPruningTime = time.Since(pruneStarted)
 		regions, bloomProof, err = pruning.Regions, pruning.Proof, pruneErr
 		prunedRegions, prunedShards = slices.Clone(pruning.Regions), slices.Clone(pruning.Shards)
 		if err != nil {
@@ -111,7 +113,9 @@ func (a *Auditor) Audit(ctx context.Context, request Request) (Result, error) {
 			allowedShards[shard] = struct{}{}
 		}
 	}
+	mvaStarted := time.Now()
 	resolution, err := a.Resolver.Resolve(ctx, request.Epoch, request.Query, regions, roots.MVA)
+	out.Metrics.MVAResolutionTime = time.Since(mvaStarted)
 	if err != nil {
 		return out, fmt.Errorf("PHV: MVA resolution: %w", err)
 	}
@@ -138,6 +142,10 @@ func (a *Auditor) Audit(ctx context.Context, request Request) (Result, error) {
 	out.Proof = Proof{Epoch: request.Epoch, Topology: Topology{RegionIDs: slices.Clone(ids), ShardsPerRegion: a.Topology.ShardsPerRegion},
 		Roots: roots, Query: request.Query, Tokens: request.Tokens, Selected: canonicalRecords,
 		MVA: resolution.Proof, HPBF: bloomProof, PrunedRegions: prunedRegions, PrunedShards: prunedShards, Root: roots.HMF}
+	out.Metrics.MVAProofBytes, err = MVAProofSize(resolution.Proof)
+	if err != nil {
+		return out, err
+	}
 	if len(resolution.Records) == 0 {
 		out.Verified = true // Resolver authenticated the empty/completeness proof.
 		out.Metrics.ProofBytes, err = ProofSize(out.Proof)
@@ -179,8 +187,10 @@ func (a *Auditor) Audit(ctx context.Context, request Request) (Result, error) {
 	}
 	out.Proof.Trees = plan.Trees
 	retrieveStart := time.Now()
-	nodes, logs, calls, maxActive, err := a.retrieve(ctx, plan)
+	nodes, logs, calls, maxActive, clsTime, cpTime, err := a.retrieve(ctx, plan)
 	out.Metrics.RetrievalTime = time.Since(retrieveStart)
+	out.Metrics.CLSRetrievalTime = clsTime
+	out.Metrics.CiphertextRetrievalTime = cpTime
 	out.Metrics.RepositoryCalls, out.Metrics.MaxConcurrent = calls, maxActive
 	if err != nil {
 		out.Failures = append(out.Failures, Failure{Tree: merkle.TreeID{Type: merkle.TreeGlobal}, Unresolved: true, Reason: err.Error()})
@@ -235,23 +245,26 @@ func (a *Auditor) Audit(ctx context.Context, request Request) (Result, error) {
 	return out, nil
 }
 
-func (a *Auditor) retrieve(ctx context.Context, plan Plan) ([]Node, []EncryptedRecord, int, int, error) {
+func (a *Auditor) retrieve(ctx context.Context, plan Plan) ([]Node, []EncryptedRecord, int, int, time.Duration, time.Duration, error) {
 	// CP batches and CLS frontier groups are independent after MVA resolution.
 	type cpResult struct {
-		logs  []EncryptedRecord
-		calls int
-		err   error
+		logs    []EncryptedRecord
+		calls   int
+		elapsed time.Duration
+		err     error
 	}
 	cp := make(chan cpResult, 1)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go func() {
+		started := time.Now()
 		logs, calls, err := a.fetchCiphertexts(ctx, plan.Selected)
 		if err != nil {
 			cancel()
 		}
-		cp <- cpResult{logs, calls, err}
+		cp <- cpResult{logs, calls, time.Since(started), err}
 	}()
+	clsStarted := time.Now()
 	workers := a.Workers
 	if workers <= 0 {
 		workers = 4
@@ -309,6 +322,7 @@ func (a *Auditor) retrieve(ctx context.Context, plan Plan) ([]Node, []EncryptedR
 		}
 	}()
 	wg.Wait()
+	clsElapsed := time.Since(clsStarted)
 	close(results)
 	var nodes []Node
 	var firstErr error
@@ -324,10 +338,10 @@ func (a *Auditor) retrieve(ctx context.Context, plan Plan) ([]Node, []EncryptedR
 		firstErr = cpDone.err
 	}
 	if firstErr != nil {
-		return nil, nil, calls, maxActive, firstErr
+		return nil, nil, calls, maxActive, clsElapsed, cpDone.elapsed, firstErr
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, nil, calls, maxActive, err
+		return nil, nil, calls, maxActive, clsElapsed, cpDone.elapsed, err
 	}
 	sort.Slice(nodes, func(i, j int) bool {
 		a, b := nodes[i].Key, nodes[j].Key
@@ -353,7 +367,7 @@ func (a *Auditor) retrieve(ctx context.Context, plan Plan) ([]Node, []EncryptedR
 		}
 		return a.LeafID < b.LeafID
 	})
-	return nodes, logs, calls, maxActive, nil
+	return nodes, logs, calls, maxActive, clsElapsed, cpDone.elapsed, nil
 }
 
 // fetchCiphertexts batches exact MVA-authenticated LogIDs. The external CP

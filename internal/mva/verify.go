@@ -15,6 +15,13 @@ import (
 // VerifyResolution authenticates both membership and completeness of the
 // returned range against a finalized MVA root. It does not read MVA state.
 func VerifyResolution(query LocatorQuery, regions []merkle.TreeID, values []*LocatorValue, proof *MVAProof, root [32]byte) error {
+	if batch, ok := query.(LogIDBatchQuery); ok {
+		authenticated, err := verifiedBatchValues(batch, regions, proof, root)
+		if err != nil {
+			return err
+		}
+		return sameBatchValues(authenticated, values)
+	}
 	if interval, ok := query.(AttrRangeQuery); ok && interval.EndTS.Before(interval.StartTS) {
 		return fmt.Errorf("verify MVA: invalid time range")
 	}
@@ -211,6 +218,9 @@ func verifyRegionBoundaries(rid string, query LocatorQuery, p *MVARegionProof, r
 // VerifiedValues extracts the exact authenticated result from a proof. This
 // lets an independent auditor verify scope without consulting the MVA tree.
 func VerifiedValues(query LocatorQuery, regions []merkle.TreeID, proof *MVAProof, root [32]byte) ([]*LocatorValue, error) {
+	if batch, ok := query.(LogIDBatchQuery); ok {
+		return verifiedBatchValues(batch, regions, proof, root)
+	}
 	if proof == nil {
 		return nil, fmt.Errorf("verify MVA: missing proof")
 	}

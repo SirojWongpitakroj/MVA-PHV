@@ -81,7 +81,8 @@ func NewHMFWithConfig(config HMFConfig, sealInterval time.Duration) (*HMF, error
 	return h, nil
 }
 
-// SelectShard maps a device to a configured Shard within an already selected Region.
+// SelectShard retains HMF's deterministic mapping for direct callers. MPM's
+// sticky round-robin policy supplies an explicit Shard to ReserveOnShard.
 func (h *HMF) SelectShard(rid, siteID, devID string) (int64, error) {
 	if h == nil {
 		return 0, fmt.Errorf("select HMF shard: HMF is nil")

@@ -197,6 +197,9 @@ func ResolveHistorical(ctx context.Context, src HistoricalReader, epoch uint64, 
 	if src == nil || query == nil {
 		return nil, nil, fmt.Errorf("resolve historical MVA: reader and query required")
 	}
+	if batch, ok := query.(LogIDBatchQuery); ok {
+		return ResolveHistoricalBatch(ctx, src, epoch, batch, regions, root)
+	}
 	if q, ok := query.(AttrRangeQuery); ok && q.EndTS.Before(q.StartTS) {
 		return nil, nil, fmt.Errorf("resolve historical MVA: invalid time range")
 	}

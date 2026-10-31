@@ -43,6 +43,16 @@ func (a *HMFAdapter) Reserve(rid, site, device string, now time.Time) (Reservati
 	}
 	return &hmfReservation{tree: a.Tree, reservation: r}, nil
 }
+func (a *HMFAdapter) ReserveShard(rid string, sid int64, now time.Time) (Reservation, error) {
+	if a == nil || a.Tree == nil {
+		return nil, fmt.Errorf("MPM HMF adapter: nil tree")
+	}
+	r, err := a.Tree.ReserveOnShard(rid, sid, now)
+	if err != nil {
+		return nil, err
+	}
+	return &hmfReservation{tree: a.Tree, reservation: r}, nil
+}
 func (a *HMFAdapter) SealExpired(now time.Time) error {
 	if a == nil || a.Tree == nil {
 		return fmt.Errorf("MPM HMF adapter: nil tree")

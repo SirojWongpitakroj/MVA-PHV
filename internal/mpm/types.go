@@ -120,8 +120,7 @@ type Reservation interface {
 
 // HMF owns the physical address allocator and sealed Segment lifecycle.
 type HMF interface {
-	SelectShard(rid, siteID, devID string) (int64, error)
-	Reserve(rid, siteID, devID string, now time.Time) (Reservation, error)
+	ReserveShard(rid string, sid int64, now time.Time) (Reservation, error)
 	SealExpired(now time.Time) error
 	PendingSegments() []Segment
 	PendingSegmentNodes(id merkle.TreeID) ([]merkle.MerkleNode, error)
@@ -191,17 +190,19 @@ type IDGenerator interface {
 }
 
 type Options struct {
-	Regions     []string // Configured region IDs in round-robin order.
-	SiteRegions SiteRegionStore
-	HMF         HMF
-	MVA         MVA
-	HPBF        HPBF
-	Ciphertexts cloudprovider.Writer
-	Encryptor   Encryptor
-	Locator     LocatorCommitter
-	Evidence    EvidenceRepository
-	Checkpoints CheckpointStore
-	IDs         IDGenerator // nil selects cryptographically random UUIDv4.
+	Regions         []string // Configured region IDs in round-robin order.
+	SiteRegions     SiteRegionStore
+	ShardsPerRegion int
+	DeviceShards    DeviceShardStore
+	HMF             HMF
+	MVA             MVA
+	HPBF            HPBF
+	Ciphertexts     cloudprovider.Writer
+	Encryptor       Encryptor
+	Locator         LocatorCommitter
+	Evidence        EvidenceRepository
+	Checkpoints     CheckpointStore
+	IDs             IDGenerator // nil selects cryptographically random UUIDv4.
 	// On restart these must come from the trusted checkpoint and match each
 	// component's restored finalized state; MPM does not reconstruct it here.
 	InitialEpoch uint64

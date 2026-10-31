@@ -22,6 +22,37 @@ func testMVALog(id byte, regionID string) (attrKey, PhysicalAddress, [32]byte) {
 	}, [32]byte{id}
 }
 
+func TestLocatorUpdatesStayImmutableAfterLaterInserts(t *testing.T) {
+	tree, err := NewMVA(1, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := []merkle.TreeID{{Type: merkle.TreeRegion, RegionID: "0"}}
+	var updates []LocatorUpdate
+	for id := byte(1); id <= 12; id++ {
+		key, address, leaf := testMVALog(id, "0")
+		byID, byAttribute, err := tree.IngestLog(candidate, key, address, leaf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		updates = append(updates, byID, byAttribute)
+	}
+	for _, update := range updates {
+		for _, page := range update.Pages {
+			var computed [32]byte
+			var err error
+			if page.IsLeaf {
+				computed, err = page.leafHash()
+			} else {
+				computed, err = page.internalHash()
+			}
+			if err != nil || computed != page.Hash {
+				t.Fatalf("updated page %d changed after a later insertion: %v", page.PageID, err)
+			}
+		}
+	}
+}
+
 func TestNewMVAInitializesGlobalTree(t *testing.T) {
 	for _, count := range []int{1, 2, 3, 4, 5} {
 		t.Run(strconv.Itoa(count), func(t *testing.T) {

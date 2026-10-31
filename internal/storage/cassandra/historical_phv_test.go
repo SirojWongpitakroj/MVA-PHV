@@ -86,6 +86,11 @@ func TestHPBFHistoricalLevelsRejectMissingOrDuplicateNodes(t *testing.T) {
 	if _, err := historicalLevels(leaves, missing); err == nil {
 		t.Fatal("accepted missing HPBF internal node")
 	}
+	legacy := []EpochNode{{MerkleNodeRecord: MerkleNodeRecord{Level: 0, Index: 0, Hash: [32]byte{3}}}}
+	levels, err = historicalLevels(leaves, legacy)
+	if err != nil || len(levels) != 2 || levels[1][0][0] != 3 {
+		t.Fatalf("legacy zero-based levels=%+v err=%v", levels, err)
+	}
 }
 
 func TestHistoricalHPBFLoaderReadsEpochManifestAndFilterVersion(t *testing.T) {
